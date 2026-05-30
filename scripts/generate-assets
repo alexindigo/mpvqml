@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -ex
+
+SCRIPTS_DIR=$(dirname "${0}")
+ASSETS_DIR="${SCRIPTS_DIR}/../tests/assets"
+
+mkdir -p "${ASSETS_DIR}"
+
+echo "- Generating assets in ${ASSETS_DIR}"
+
+# Test video files
+ffmpeg -f lavfi -i color=c=black:s=64x64:d=60 -c:v libx264 -pix_fmt yuv420p "${ASSETS_DIR}/test_main_video.mp4" -y -loglevel quiet -r 1
+ffmpeg -f lavfi -i color=c=blue:s=320x240:d=1 -c:v libx264 -pix_fmt yuv420p "${ASSETS_DIR}/test_one_video.mp4" -y -loglevel quiet
+ffmpeg -f lavfi -i color=c=red:s=640x480:d=1 -c:v libx264 -pix_fmt yuv420p "${ASSETS_DIR}/test_two_video.mp4" -y -loglevel quiet
+
+# Test audio files
+ffmpeg -f lavfi -i "sine=frequency=440:duration=1" -c:a libmp3lame "${ASSETS_DIR}/test_audio1.mp3" -y -loglevel quiet
+ffmpeg -f lavfi -i "sine=frequency=880:duration=1" -c:a libvorbis "${ASSETS_DIR}/test_audio2.ogg" -y -loglevel quiet
+
+# Test image files
+ffmpeg -f lavfi -i color=c=green:s=1920x1080:d=1 -vframes 1 "${ASSETS_DIR}/test_image1.jpg" -y -loglevel quiet
+ffmpeg -f lavfi -i color=c=yellow:s=800x600:d=1 -vframes 1 "${ASSETS_DIR}/test_image2.png" -y -loglevel quiet
+
+# Test subtitles files
+cat << 'EOF' > "${ASSETS_DIR}/test_subs1.srt"
+1
+00:00:00,000 --> 00:00:01,000
+Mock Subtitle Anchor Vector Alpha
+EOF
+
+cat << 'EOF' > "${ASSETS_DIR}/test_subs2.srt"
+1
+00:00:00,000 --> 00:00:01,000
+Mock Subtitle Anchor Vector Beta
+EOF
+
+echo "+ Assets generated successfully in ${ASSETS_DIR}"

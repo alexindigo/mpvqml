@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -e
+
+BUILD_DIR="build-release"
+
+if [ ! -d "${BUILD_DIR}" ]; then
+    echo "error: build directory not found. run scripts/build first."
+    exit 1
+fi
+
+PREFIX=${PREFIX:-/usr/local}
+
+cmake --install ${BUILD_DIR} --prefix ${PREFIX}

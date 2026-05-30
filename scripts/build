@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -ex
+
+BUILD_DIR="build-release"
+
+cmake -B ${BUILD_DIR} -S . \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TEST_MODE=OFF
+
+cmake --build ${BUILD_DIR}

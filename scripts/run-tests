@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -e
+
+SCRIPTS_DIR=$(dirname "${0}")
+BUILD_DIR=${1:-"build-debug"}
+COVERAGE_DIR="coverage"
+LCOV_OPTS="--ignore-errors inconsistent,empty"
+REMOVE_OPTS="--ignore-errors unused,inconsistent,empty"
+EXCLUDE_PATTERNS=('*_autogen*' '*/tests/*' '/usr/*')
+
+QMLTESTRUNNER="/usr/lib/qt6/bin/qmltestrunner"
+
+# Color formatting helpers
+GREEN='\033[1;32m'
+CYAN='\033[1;36m'
+YELLOW='\033[1;33m'
+RESET='\033[0m'
+
+process_pipeline() {
+    local label=$1
+    local prefix=$2
+    local test_command=$3
+
+    echo -e "${CYAN}=========================================================${RESET}"
+    echo -e "-- running subsystem: ${label}"
+    echo -e "${CYAN}=========================================================${RESET}"
+
+    # Reset counters
+    lcov --directory "${BUILD_DIR}" -z
+
+    # Run tests
+    eval "${test_command}"
+
+    # Capture and clean (skip if no coverage data)
+    if lcov --capture --directory "${BUILD_DIR}" -o "${COVERAGE_DIR}/${prefix}_raw.info" ${LCOV_OPTS} > /dev/null 2>&1 && \
+       [ -s "${COVERAGE_DIR}/${prefix}_raw.info" ]; then
+        lcov --remove "${COVERAGE_DIR}/${prefix}_raw.info" "${EXCLUDE_PATTERNS[@]}" \
+             -o "${COVERAGE_DIR}/${prefix}_clean.info" ${REMOVE_OPTS} > /dev/null 2>&1
+        genhtml "${COVERAGE_DIR}/${prefix}_clean.info" --output-directory "${COVERAGE_DIR}/html_${prefix}" > /dev/null
+    else
+        echo "  (no coverage data for subsystem: ${label})"
+    fi
+}
+
+mkdir -p "${COVERAGE_DIR}"
+
+# -- Execute pipelines
+
+# Pipeline 1: Native C++ Unit Tests
+process_pipeline \
+    "C++ Unit Testing" \
+    "cpp" \
+    "(cd '${BUILD_DIR}' && ctest --output-on-failure)"
+
+# Pipeline 2: Declarative QML Integration Tests
+process_pipeline \
+    "QML Integration Testing" \
+    "qml" \
+    "QML_IMPORT_PATH='${BUILD_DIR}' '${QMLTESTRUNNER}' -v2 -input tests/TestPlan.qml || { rc=\$?; echo -e '${YELLOW}QML TESTS FAILED (exit code '\$rc')${RESET}' 1>&2; exit \$rc; }"
+
+# Pipeline 3: Combined Matrix Generation (skip missing traces)
+COMBINE_FILES=()
+[ -f "${COVERAGE_DIR}/cpp_clean.info" ] && COMBINE_FILES+=(-a "${COVERAGE_DIR}/cpp_clean.info")
+[ -f "${COVERAGE_DIR}/qml_clean.info" ] && COMBINE_FILES+=(-a "${COVERAGE_DIR}/qml_clean.info")
+if [ ${#COMBINE_FILES[@]} -ge 2 ]; then
+    lcov "${COMBINE_FILES[@]}" -o "${COVERAGE_DIR}/combined_api.info" ${LCOV_OPTS} > /dev/null
+    genhtml "${COVERAGE_DIR}/combined_api.info" --output-directory "${COVERAGE_DIR}/html_combined" > /dev/null
+fi
+
+
+# -- Final Metrics Dashboard
+# Extract summary metrics from generated tracefiles
+
+extract_summary() {
+    local info_file=$1
+    if [ -f "$info_file" ]; then
+        # Parse coverage percentages from lcov output
+        lcov --summary "$info_file" 2>&1 | grep -E "lines|functions" || true
+    else
+        echo "  Metrics unavailable (Tracefile missing)"
+    fi
+}
+
+echo -e "\n"
+echo -e "${GREEN}=========================================================${RESET}"
+echo -e "${GREEN}final coverage matrix summary${RESET}"
+echo -e "${GREEN}=========================================================${RESET}"
+
+echo -e "${YELLOW}-- [pipeline 1] isolated c++ unit tests:${RESET}"
+extract_summary "${COVERAGE_DIR}/cpp_clean.info"
+echo "--------------------------------------------------------"
+
+echo -e "${YELLOW}-- [pipeline 2] declarative qml integration tests:${RESET}"
+extract_summary "${COVERAGE_DIR}/qml_clean.info"
+echo "--------------------------------------------------------"
+
+if [ -f "${COVERAGE_DIR}/combined_api.info" ]; then
+    echo -e "${GREEN}-- [combined total] complete system coverage api matrix:${RESET}"
+    extract_summary "${COVERAGE_DIR}/combined_api.info"
+fi
+echo -e "${GREEN}=========================================================${RESET}"
+echo -e "HTML dashboards generated in: ${CYAN}${COVERAGE_DIR}/html_combined/${RESET}\n"

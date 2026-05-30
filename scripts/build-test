@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -ex
+
+SCRIPTS_DIR=$(dirname "${0}")
+BUILD_DIR="build-debug"
+COVERAGE_FILE="coverage.info"
+COVERAGE_DIR="coverage_html"
+
+# Clear out old cache states
+rm -rf ${BUILD_DIR} ${COVERAGE_FILE} ${COVERAGE_DIR}
+
+# Configure debug build with code instrumentation
+cmake -B ${BUILD_DIR} -S . \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DBUILD_TEST_MODE=ON \
+    -DENABLE_COVERAGE=ON
+
+# Compile the test binaries
+cmake --build ${BUILD_DIR}
+
+# Run tests
+${SCRIPTS_DIR}/run-tests ${BUILD_DIR}
