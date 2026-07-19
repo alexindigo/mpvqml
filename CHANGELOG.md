@@ -4,6 +4,19 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-07-19
+
+### Fixed
+
+- Packaging: `cmake --install` now ships the actual QML module. Prior to
+  this the install rules only exported the C++ headers; the shared
+  library `libmpvqml.so`, the QML plugin (`libmpvqmlplugin.so`),
+  `qmldir`, and `mpvqml.qmltypes` were built but never installed, so
+  distro packages (AUR, custom prefixes) produced a headers-only package
+  that could not be `import`ed from QML at runtime. Replaced the ignored
+  `INSTALL_DIRECTORY` argument on `qt_add_qml_module` with explicit
+  `install(TARGETS)` + `install(DIRECTORY .../MpvQml/)` rules.
+
 ## [0.1.0] — 2026-07-19
 
 Initial release. QML component wrapping libmpv via MpvQt for Qt 6.5+

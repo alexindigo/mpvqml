@@ -23,7 +23,6 @@ qt_add_qml_module(mpvqml
     URI MpvQml
     VERSION 1.0
     OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/MpvQml
-    INSTALL_DIRECTORY ${CMAKE_INSTALL_LIBDIR}/qt6/qml/MpvQml
     SOURCES
         mpvplayer.cpp
         mpvplayer.h
@@ -45,6 +44,18 @@ target_link_libraries(mpvqml PRIVATE
 )
 
 # ==================== INSTALL TARGETS ====================
+install(TARGETS mpvqml
+    EXPORT mpvqmlTargets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/MpvQml/
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/qt6/qml/MpvQml
+)
+
 install(FILES
     mpvplayer.h
     mpvcontroller_adapter.h
