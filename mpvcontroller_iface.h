@@ -18,6 +18,8 @@ public:
                                  uint64_t id = 0) = 0;
     virtual int commandAsync(const QVariant &params, int id = 0) = 0;
     virtual int commandAsync(const QStringList &params, int id = 0) = 0;
+    virtual int rawSetPropertyString(const QString &property,
+                                     const QString &value) = 0;
     virtual mpv_handle *rawMpv() const = 0;
 
 signals:

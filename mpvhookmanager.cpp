@@ -9,6 +9,7 @@ MpvHookManager::~MpvHookManager() {
         m_hookClientActive.storeRelaxed(0);
         mpv_set_wakeup_callback(m_hookClient, nullptr, nullptr);
         mpv_destroy(m_hookClient);
+        m_hookClient = nullptr;
     }
 }
 
@@ -23,14 +24,14 @@ void MpvHookManager::setupHookClient(mpv_handle *core) {
 }
 
 void MpvHookManager::hookAdd(const QString &name, int priority) {
-    if (!m_hookClient)
+    if (!m_hookClient || !m_hookClientActive.loadRelaxed())
         return;
     uint64_t id = m_nextHookId++;
     mpv_hook_add(m_hookClient, id, name.toUtf8().constData(), priority);
 }
 
 void MpvHookManager::hookContinue(uint64_t id) {
-    if (m_hookClient)
+    if (m_hookClient && m_hookClientActive.loadRelaxed())
         mpv_hook_continue(m_hookClient, id);
 }
 

@@ -46,6 +46,16 @@ int MpvControllerAdapter::commandAsync(const QStringList &params, int id) {
     return m_real->commandAsync(QVariant(params), id);
 }
 
+int MpvControllerAdapter::rawSetPropertyString(const QString &property,
+                                               const QString &value) {
+    mpv_handle *handle = m_real->mpv();
+    if (!handle)
+        return MPV_ERROR_UNINITIALIZED;
+    return mpv_set_property_string(handle,
+                                   property.toUtf8().constData(),
+                                   value.toUtf8().constData());
+}
+
 mpv_handle *MpvControllerAdapter::rawMpv() const {
     return m_real->mpv();
 }

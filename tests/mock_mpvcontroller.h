@@ -41,6 +41,14 @@ public:
         return 0;
     }
 
+    int rawSetPropertyString(const QString &property,
+                             const QString &value) override {
+        m_lastRawSetProperty = property;
+        m_lastRawSetValue = value;
+        ++m_rawSetPropertyCount;
+        return 0;
+    }
+
     mpv_handle *rawMpv() const override {
         return nullptr;
     }
@@ -54,6 +62,9 @@ public:
         m_lastObservedProperty.clear();
         m_lastAsyncCommandStringList.clear();
         m_asyncCommandCount = 0;
+        m_lastRawSetProperty.clear();
+        m_lastRawSetValue.clear();
+        m_rawSetPropertyCount = 0;
     }
 
     // Test accessors
@@ -68,4 +79,7 @@ public:
     QStringList m_lastAsyncCommandStringList;
     int m_lastAsyncId = 0;
     int m_asyncCommandCount = 0;
+    QString m_lastRawSetProperty;
+    QString m_lastRawSetValue;
+    int m_rawSetPropertyCount = 0;
 };

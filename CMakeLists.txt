@@ -36,11 +36,11 @@ qt_add_qml_module(mpvqml
         mpvhookmanager.h
 )
 
-target_include_directories(mpvqml PUBLIC ${MPV_INCLUDE_DIRS} /usr/include /usr/include/MpvQt)
+target_include_directories(mpvqml PUBLIC ${MPV_INCLUDE_DIRS})
 target_link_libraries(mpvqml PRIVATE
     Qt6::Core
     Qt6::Quick
-    MpvQt
+    MpvQt::MpvQt
     ${MPV_LIBRARIES}
 )
 
@@ -65,12 +65,13 @@ if(BUILD_TEST_MODE)
         tests/mock_mpvcontroller.cpp
     )
 
-  target_include_directories(mpvqml_cpp_tests PUBLIC ${MPV_INCLUDE_DIRS} /usr/include /usr/include/MpvQt .)
+  target_include_directories(mpvqml_cpp_tests PUBLIC ${MPV_INCLUDE_DIRS} .)
   target_link_libraries(mpvqml_cpp_tests PRIVATE
+        mpvqml
         Qt6::Core
         Qt6::Quick
         Qt6::Test
-        MpvQt
+        MpvQt::MpvQt
         ${MPV_LIBRARIES}
     )
 
@@ -92,8 +93,6 @@ if(ENABLE_COVERAGE)
     # 2. Profile the C++ test binary runner
     target_compile_options(mpvqml_cpp_tests PRIVATE --coverage -fprofile-abs-path)
     target_link_options(mpvqml_cpp_tests PRIVATE --coverage -fprofile-abs-path)
-
-    target_link_libraries(mpvqml_cpp_tests PRIVATE mpvqml)
   endif()
 endif()
 

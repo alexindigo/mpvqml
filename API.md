@@ -23,7 +23,7 @@ MpvPlayer {
 
 | Property | Type | Description |
 |---|---|---|
-| `source` | string | URL or file path of the current media. Setting it loads and starts playback. |
+| `source` | string | URL or file path of the current media. Setting it loads and starts playback. Assigning the same value is a no-op; call `load(url)` to force a reload. |
 | `loopFile` | var | Loop mode for the current file. `"no"` (default), `"inf"`, or a number. |
 | `loopPlaylist` | var | Loop mode for the playlist. Same values as `loopFile`. |
 
@@ -251,7 +251,7 @@ player.sendMouseClick(1, false)  // left button release
 | Method | Description |
 |---|---|
 | `sendMousePosition(x, y)` | Report mouse position to mpv's internal mouse tracking. |
-| `sendMouseClick(button, isPress)` | Report a mouse click. `button`: 1 (left), 2 (middle), 3 (right). |
+| `sendMouseClick(button, isPress)` | Report a mouse click. `button` uses mpv ordering: 1 (left), 2 (middle), 3 (right). This does not match `Qt::MouseButton`; remap when forwarding a Qt event. |
 
 ### Logging
 
@@ -277,7 +277,7 @@ player.hookContinue(hookId)
 
 | Method | Description |
 |---|---|
-| `setProperty(name, value)` | Set an arbitrary mpv property by name. Works at runtime. |
+| `setProperty(name, value)` | Set an arbitrary mpv property by name (raw pass-through to `mpv_set_property_string`). Bypasses typed setters' dirty/pending pipeline; intended as an escape hatch for properties without a dedicated QML setter. |
 | `loadConfigFile(path)` | Load an mpv configuration file. |
 | `commandAsync(params, id)` | Run an mpv command asynchronously. Results arrive via `asyncCommandFinished`. |
 | `setRenderParameter(name, value)` | Set a render context parameter (e.g. `"target-peak"`, `"ambient-light"`). |

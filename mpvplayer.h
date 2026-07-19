@@ -318,13 +318,9 @@ signals:
     void demuxerCacheStateChanged();
     void lastErrorChanged();
 
-protected:
-    QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;
-
 private:
     void setupPropertyObservers();
     void syncProperties();
-    void applyFillMode();
     void emitError(int code, const QString &message);
 
 
@@ -350,7 +346,7 @@ private:
     QVariantList m_trackList;
     QVariantList m_playlist;
     QList<double> m_chapterList;
-    QMap<QString, QString> m_metadata;
+    QVariantMap m_metadata;
     QVariantList m_audioDeviceList;
     QString m_currentAudioDevice = QStringLiteral("auto");
 

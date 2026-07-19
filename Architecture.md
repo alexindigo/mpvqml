@@ -38,7 +38,7 @@ QQuickFramebufferObject
 3. Inside `init()`: `mpv_create()`, `mpv_initialize()`, property observations are set up
 4. `MpvPlayer` constructor body: wraps the initialized controller, sets up signals, marks dirty defaults
 5. QML engine applies property bindings (calls setters — they mark dirty, no mpv access yet)
-6. First frame render: `updatePaintNode()` sets `m_rendererInitialized = true`, queues `syncProperties()`
+6. Renderer up: `MpvAbstractItem::ready` fires; slot sets `m_rendererInitialized = true` and calls `syncProperties()`
 7. `syncProperties()` pushes all dirty properties to mpv, runs deferred load actions
 
 All steps after step 3 are post-`mpv_initialize()`. Options set via `setOption()` (which calls `mpv_set_option_string()`) after this point may not take effect — `mpv_set_option_string` is a pre-init API. For runtime changes, use `mpv_set_property_string` or the `set` command.

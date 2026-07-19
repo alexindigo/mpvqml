@@ -9,6 +9,37 @@
 #include <QUrl>
 #include <mpv/client.h>
 
+// Detect drift between our QML-facing MpvError enum and libmpv's numeric
+// error codes at compile time. If libmpv ever renumbers, these will fail
+// to build instead of silently returning wrong values to QML.
+static_assert(static_cast<int>(MpvError::Success) == MPV_ERROR_SUCCESS, "");
+static_assert(static_cast<int>(MpvError::EventQueueFull) == MPV_ERROR_EVENT_QUEUE_FULL, "");
+static_assert(static_cast<int>(MpvError::NoMem) == MPV_ERROR_NOMEM, "");
+static_assert(static_cast<int>(MpvError::Uninitialized) == MPV_ERROR_UNINITIALIZED, "");
+static_assert(static_cast<int>(MpvError::InvalidParameter) == MPV_ERROR_INVALID_PARAMETER, "");
+static_assert(static_cast<int>(MpvError::OptionNotFound) == MPV_ERROR_OPTION_NOT_FOUND, "");
+static_assert(static_cast<int>(MpvError::OptionFormat) == MPV_ERROR_OPTION_FORMAT, "");
+static_assert(static_cast<int>(MpvError::OptionError) == MPV_ERROR_OPTION_ERROR, "");
+static_assert(static_cast<int>(MpvError::PropertyNotFound) == MPV_ERROR_PROPERTY_NOT_FOUND, "");
+static_assert(static_cast<int>(MpvError::PropertyFormat) == MPV_ERROR_PROPERTY_FORMAT, "");
+static_assert(static_cast<int>(MpvError::PropertyUnavailable) == MPV_ERROR_PROPERTY_UNAVAILABLE, "");
+static_assert(static_cast<int>(MpvError::PropertyError) == MPV_ERROR_PROPERTY_ERROR, "");
+static_assert(static_cast<int>(MpvError::Command) == MPV_ERROR_COMMAND, "");
+static_assert(static_cast<int>(MpvError::LoadingFailed) == MPV_ERROR_LOADING_FAILED, "");
+static_assert(static_cast<int>(MpvError::AoInitFailed) == MPV_ERROR_AO_INIT_FAILED, "");
+static_assert(static_cast<int>(MpvError::VoInitFailed) == MPV_ERROR_VO_INIT_FAILED, "");
+static_assert(static_cast<int>(MpvError::NothingToPlay) == MPV_ERROR_NOTHING_TO_PLAY, "");
+static_assert(static_cast<int>(MpvError::UnknownFormat) == MPV_ERROR_UNKNOWN_FORMAT, "");
+static_assert(static_cast<int>(MpvError::Unsupported) == MPV_ERROR_UNSUPPORTED, "");
+static_assert(static_cast<int>(MpvError::NotImplemented) == MPV_ERROR_NOT_IMPLEMENTED, "");
+static_assert(static_cast<int>(MpvError::Generic) == MPV_ERROR_GENERIC, "");
+
+// Fuzzy equality that also treats two values near zero as equal.
+// qFuzzyCompare alone returns false when both operands are ~0.0.
+static inline bool nearlyEqual(double a, double b) {
+    return qFuzzyCompare(a, b) || (qFuzzyIsNull(a) && qFuzzyIsNull(b));
+}
+
 static QVariantList hyphenKeys(QVariantList src) {
     QVariantList out;
     for (const QVariant &v : src) {
@@ -19,8 +50,9 @@ static QVariantList hyphenKeys(QVariantList src) {
             QString key = it.key();
             if (key == QLatin1String("id"))
                 key = QStringLiteral("trackId");
-            int idx = key.indexOf(QLatin1Char('-'));
-            if (idx > 0) {
+            for (int idx = key.indexOf(QLatin1Char('-'));
+                 idx > 0 && idx + 1 < key.size();
+                 idx = key.indexOf(QLatin1Char('-'), idx)) {
                 QChar u = key[idx + 1].toUpper();
                 key = key.left(idx) + u + key.mid(idx + 2);
             }
@@ -77,8 +109,6 @@ static QVariantList hyphenKeys(QVariantList src) {
 
 MpvPlayer::MpvPlayer(QQuickItem *parent, MpvControllerIface *ctrl)
     : MpvAbstractItem(parent) {
-  setFlag(QQuickItem::ItemHasContents, true);
-
   if (QQuickWindow::graphicsApi() == QSGRendererInterface::Unknown) {
     QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
   }
@@ -125,17 +155,32 @@ MpvPlayer::MpvPlayer(QQuickItem *parent, MpvControllerIface *ctrl)
   connect(m_ctrl, &MpvControllerIface::asyncReply, this,
           &MpvPlayer::asyncCommandFinished);
 
-  // Mark intentional deviations from mpv defaults
-  // Push hwdec immediately so mpv probes before the first file load
-  m_ctrl->setProperty(QStringLiteral("hwdec"), QStringLiteral("auto"));
+  // Mark intentional deviations from mpv defaults. Everything routes through
+  // the dirty/pending pipeline; syncProperties() flushes on renderer init.
+  m_pendingProperties[QStringLiteral("hwdec")] = QStringLiteral("auto");
+  m_dirtyProperties.insert(QStringLiteral("hwdec"));
   m_dirtyProperties.insert(QStringLiteral("tscale"));
-  m_dirtyProperties.insert(QStringLiteral("fillMode"));
+  // Seed default fillMode ("preserveAspectFit") into the real mpv props it maps to
+  m_pendingProperties[QStringLiteral("keepaspect")] = QStringLiteral("yes");
+  m_pendingProperties[QStringLiteral("panscan")] = 0.0;
+  m_dirtyProperties.insert(QStringLiteral("keepaspect"));
+  m_dirtyProperties.insert(QStringLiteral("panscan"));
 
   // Wire helper signals
   connect(m_logClient, &MpvLogClient::logMessage, this,
           &MpvPlayer::logMessage);
   connect(m_hookManager, &MpvHookManager::hookTriggered, this,
           &MpvPlayer::hookTriggered);
+
+  // Renderer-ready gate: once the render context is up, flush any
+  // properties QML set during construction and run deferred load actions.
+  // MpvAbstractItem::ready() is the idiomatic point for this.
+  connect(this, &MpvAbstractItem::ready, this, [this]() {
+    if (!m_rendererInitialized) {
+      m_rendererInitialized = true;
+      syncProperties();
+    }
+  });
 }
 
 void MpvPlayer::setupPropertyObservers() {
@@ -182,7 +227,7 @@ void MpvPlayer::setupPropertyObservers() {
       {QStringLiteral("speed"), MPV_FORMAT_DOUBLE,
        [this](const QVariant &v) {
          double s = v.toDouble();
-         if (m_playbackSpeed != s) {
+         if (!nearlyEqual(m_playbackSpeed, s)) {
            m_playbackSpeed = s;
            emit playbackSpeedChanged();
          }
@@ -209,7 +254,7 @@ void MpvPlayer::setupPropertyObservers() {
       {QStringLiteral("volume"), MPV_FORMAT_DOUBLE,
        [this](const QVariant &v) {
          double vol = v.toDouble();
-         if (m_volume != vol) {
+         if (!nearlyEqual(m_volume, vol)) {
            m_volume = vol;
            emit volumeChanged();
          }
@@ -330,7 +375,7 @@ void MpvPlayer::setupPropertyObservers() {
       {QStringLiteral("audio-delay"), MPV_FORMAT_DOUBLE,
        [this](const QVariant &v) {
          double ad = v.toDouble();
-         if (m_audioDelay != ad) {
+         if (!nearlyEqual(m_audioDelay, ad)) {
            m_audioDelay = ad;
            emit audioDelayChanged();
          }
@@ -339,7 +384,7 @@ void MpvPlayer::setupPropertyObservers() {
       {QStringLiteral("sub-delay"), MPV_FORMAT_DOUBLE,
        [this](const QVariant &v) {
          double sd = v.toDouble();
-         if (m_subDelay != sd) {
+         if (!nearlyEqual(m_subDelay, sd)) {
            m_subDelay = sd;
            emit subDelayChanged();
          }
@@ -369,12 +414,11 @@ void MpvPlayer::setupPropertyObservers() {
 
       {QStringLiteral("metadata"), MPV_FORMAT_NODE,
        [this](const QVariant &v) {
-         m_metadata.clear();
-         QVariantMap rawMap = v.toMap();
-         for (auto it = rawMap.constBegin(); it != rawMap.constEnd(); ++it) {
-           m_metadata.insert(it.key(), it.value().toString());
+         QVariantMap incoming = v.toMap();
+         if (m_metadata != incoming) {
+           m_metadata = incoming;
+           emit metadataChanged();
          }
-         emit metadataChanged();
        }},
 
       {QStringLiteral("hwdec-current"), MPV_FORMAT_STRING,
@@ -435,11 +479,23 @@ QString MpvPlayer::fillMode() const { return m_fillMode; }
 void MpvPlayer::setFillMode(const QString &val) {
   if (m_fillMode != val) {
     m_fillMode = val;
-    m_pendingProperties[QStringLiteral("fillMode")] = val;
+    // Translate the QML-facing fillMode into the two real mpv properties
+    // it actually controls, so pending/dirty flow uniformly.
+    QString keepAspect = QStringLiteral("yes");
+    double panScan = 0.0;
+    if (val == QLatin1String("preserveAspectCrop")) {
+      panScan = 1.0;
+    } else if (val == QLatin1String("stretch")) {
+      keepAspect = QStringLiteral("no");
+    }
+    m_pendingProperties[QStringLiteral("keepaspect")] = keepAspect;
+    m_pendingProperties[QStringLiteral("panscan")] = panScan;
+    m_dirtyProperties.insert(QStringLiteral("keepaspect"));
+    m_dirtyProperties.insert(QStringLiteral("panscan"));
     emit fillModeChanged();
-    m_dirtyProperties.insert(QStringLiteral("fillMode"));
     if (m_rendererInitialized) {
-      applyFillMode();
+      m_ctrl->setProperty(QStringLiteral("keepaspect"), keepAspect);
+      m_ctrl->setProperty(QStringLiteral("panscan"), panScan);
     }
   }
 }
@@ -502,12 +558,7 @@ void MpvPlayer::setLoopPlaylist(const QVariant &val) {
 QVariantList MpvPlayer::trackList() const { return m_trackList; }
 QVariantList MpvPlayer::playlist() const { return m_playlist; }
 QList<double> MpvPlayer::chapterList() const { return m_chapterList; }
-QVariantMap MpvPlayer::metadata() const {
-    QVariantMap map;
-    for (auto it = m_metadata.constBegin(); it != m_metadata.constEnd(); ++it)
-        map.insert(it.key(), it.value());
-    return map;
-}
+QVariantMap MpvPlayer::metadata() const { return m_metadata; }
 QVariantList MpvPlayer::audioDeviceList() const { return m_audioDeviceList; }
 
 QString MpvPlayer::currentAudioDevice() const { return m_currentAudioDevice; }
@@ -553,24 +604,6 @@ void MpvPlayer::setAudioDelay(double val) {
 double MpvPlayer::subDelay() const { return m_subDelay; }
 void MpvPlayer::setSubDelay(double val) {
   MPV_SETTER_DOUBLE(m_subDelay, subDelay, "sub-delay")
-}
-
-// -- Layout modifiers
-
-void MpvPlayer::applyFillMode() {
-  if (m_fillMode == QLatin1String("preserveAspectCrop")) {
-    m_ctrl->setProperty(QStringLiteral("keepaspect"),
-                                 QStringLiteral("yes"));
-    m_ctrl->setProperty(QStringLiteral("panscan"), 1.0);
-  } else if (m_fillMode == QLatin1String("stretch")) {
-    m_ctrl->setProperty(QStringLiteral("keepaspect"),
-                                 QStringLiteral("no"));
-    m_ctrl->setProperty(QStringLiteral("panscan"), 0.0);
-  } else {
-    m_ctrl->setProperty(QStringLiteral("keepaspect"),
-                                 QStringLiteral("yes"));
-    m_ctrl->setProperty(QStringLiteral("panscan"), 0.0);
-  }
 }
 
 // -- Invocable operations
@@ -645,12 +678,10 @@ void MpvPlayer::loadDirectory(const QString &path,
   }
   bool isFirstItem = true;
   for (const QFileInfo &file : fileList) {
-    QString action = QStringLiteral("append");
-    if (isFirstItem && mode == QLatin1String("replace")) {
-      action = QStringLiteral("replace");
-    } else if (mode == QLatin1String("replace")) {
-      action = QStringLiteral("append");
-    }
+    QString action =
+        (isFirstItem && mode == QLatin1String("replace"))
+            ? QStringLiteral("replace")
+            : QStringLiteral("append");
     m_ctrl->command(QStringList{QStringLiteral("loadfile"),
                                          file.absoluteFilePath(), action});
     isFirstItem = false;
@@ -711,8 +742,7 @@ void MpvPlayer::markSeekPosition() {
 
 void MpvPlayer::revertSeek() {
   if (m_rendererInitialized) {
-    m_ctrl->command(
-        QStringList{QStringLiteral("revert-seek"), QStringLiteral("")});
+    m_ctrl->command(QStringList{QStringLiteral("revert-seek")});
   }
 }
 
@@ -832,10 +862,7 @@ void MpvPlayer::loadConfigFile(const QString &path) {
 }
 
 void MpvPlayer::setProperty(const QString &name, const QString &value) {
-  mpv_handle *handle = m_ctrl->rawMpv();
-  if (handle)
-    mpv_set_property_string(handle, name.toUtf8().constData(),
-                            value.toUtf8().constData());
+  m_ctrl->rawSetPropertyString(name, value);
 }
 
 int MpvPlayer::commandAsync(const QStringList &params, int id) {
@@ -906,6 +933,10 @@ void MpvPlayer::sendMousePosition(int x, int y) {
   }
 }
 
+// button is 1-based in mpv's ordering: 1=left, 2=middle, 3=right.
+// Translated to mpv's zero-based MOUSE_BTN0/1/2/... naming.
+// Note: this does NOT match Qt::MouseButton values (Left=1, Right=2, Middle=4);
+// callers coming from a Qt::MouseEvent must remap.
 void MpvPlayer::sendMouseClick(int button, bool isPress) {
   if (m_rendererInitialized) {
     QString buttonName =
@@ -955,10 +986,13 @@ void MpvPlayer::syncProperties() {
     return m_pendingProperties.value(key, fallback);
   };
 
-  if (m_dirtyProperties.contains(QStringLiteral("fillMode"))) {
-    m_fillMode = pending(QStringLiteral("fillMode"), m_fillMode).toString();
-    applyFillMode();
-  }
+  if (m_dirtyProperties.contains(QStringLiteral("keepaspect")))
+    m_ctrl->setProperty(QStringLiteral("keepaspect"),
+        pending(QStringLiteral("keepaspect"),
+                QStringLiteral("yes")).toString());
+  if (m_dirtyProperties.contains(QStringLiteral("panscan")))
+    m_ctrl->setProperty(QStringLiteral("panscan"),
+        pending(QStringLiteral("panscan"), 0.0).toDouble());
   if (m_dirtyProperties.contains(QStringLiteral("screenshot-directory"))
       && !m_screenshotDirectory.isEmpty())
     m_ctrl->setProperty(QStringLiteral("screenshot-directory"),
@@ -1055,16 +1089,4 @@ void MpvPlayer::syncProperties() {
   m_dirtyProperties.clear();
 }
 
-QSGNode *MpvPlayer::updatePaintNode(QSGNode *oldNode,
-                                    UpdatePaintNodeData *data) {
-  QSGNode *node = MpvAbstractItem::updatePaintNode(oldNode, data);
 
-  if (!m_rendererInitialized) {
-    m_rendererInitialized = true;
-
-    QMetaObject::invokeMethod(this, [this]() { syncProperties(); },
-                              Qt::QueuedConnection);
-  }
-
-  return node;
-}

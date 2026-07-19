@@ -15,6 +15,8 @@ public:
                          uint64_t id = 0) override;
     int commandAsync(const QVariant &params, int id = 0) override;
     int commandAsync(const QStringList &params, int id = 0) override;
+    int rawSetPropertyString(const QString &property,
+                             const QString &value) override;
     mpv_handle *rawMpv() const override;
 
 private:

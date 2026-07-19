@@ -359,7 +359,8 @@ private slots:
     m_player->m_screenshotDirectory = QStringLiteral("/tmp");
     m_player->m_userShaders = QStringLiteral("active_shaders.glsl");
 
-    m_player->updatePaintNode(nullptr, nullptr);
+    // Formerly called updatePaintNode(nullptr,nullptr) to trigger init;
+    // that hook was replaced by MpvAbstractItem::ready() emission.
     m_player->releaseResources();
     m_player->mpvController();
 
@@ -372,7 +373,7 @@ private slots:
     m_player->sendScriptMessage(QStringList{QStringLiteral("ping")});
     m_player->triggerScriptBinding(QStringLiteral("macro"));
     m_player->setupPropertyObservers();
-    m_player->applyFillMode();
+    m_player->setFillMode(QStringLiteral("preserveAspectCrop"));
     // smoke test: no crash
     QVERIFY(true);
   }
@@ -733,9 +734,19 @@ private slots:
   void test_sync_properties_constructor_dirty_defaults() {
     // Intentional deviations from mpv defaults are marked dirty in ctor
     QVERIFY(m_player->m_dirtyProperties.contains("tscale"));
-    QVERIFY(m_player->m_dirtyProperties.contains("fillMode"));
+    // Default fillMode "preserveAspectFit" is decomposed into the two real
+    // mpv properties it maps to.
+    QVERIFY(m_player->m_dirtyProperties.contains("keepaspect"));
+    QVERIFY(m_player->m_dirtyProperties.contains("panscan"));
+    QCOMPARE(m_player->m_pendingProperties.value("keepaspect").toString(),
+             QStringLiteral("yes"));
+    QCOMPARE(m_player->m_pendingProperties.value("panscan").toDouble(), 0.0);
 
-    // hwdec is pushed immediately in ctor, not deferred via dirty set
+    // hwdec deviates from mpv's default ("no") and flows through the
+    // dirty/pending pipeline like every other setter.
+    QVERIFY(m_player->m_dirtyProperties.contains("hwdec"));
+    QCOMPARE(m_player->m_pendingProperties.value("hwdec").toString(),
+             QStringLiteral("auto"));
     QCOMPARE(m_player->m_hwdec, QStringLiteral("auto"));
 
     // mpv-matching defaults are NOT dirty
@@ -993,6 +1004,209 @@ private slots:
     }
 
     mpv_destroy(mpv);
+  }
+
+  // -- Tier A regression tests
+
+  void test_revert_seek_has_no_empty_arg() {
+    m_player->m_rendererInitialized = true;
+    m_mockCtrl->reset();
+    m_player->revertSeek();
+    QCOMPARE(m_mockCtrl->m_lastCommand,
+             QStringList{QStringLiteral("revert-seek")});
+  }
+
+  void test_load_directory_append_mode_first_item_appends() {
+    m_player->m_rendererInitialized = true;
+
+    QString tmpDir = QDir::tempPath() + QStringLiteral("/mpvqml_ldir_append");
+    QDir().mkpath(tmpDir);
+    QFile f(tmpDir + QStringLiteral("/a.mp4"));
+    QVERIFY(f.open(QIODevice::WriteOnly)); f.close();
+
+    m_mockCtrl->reset();
+    m_player->loadDirectory(tmpDir, QStringList{}, QStringLiteral("append"));
+    QVERIFY(m_mockCtrl->m_commandCount >= 1);
+    QCOMPARE(m_mockCtrl->m_lastCommand.at(0), QStringLiteral("loadfile"));
+    QCOMPARE(m_mockCtrl->m_lastCommand.at(2), QStringLiteral("append"));
+
+    QFile::remove(tmpDir + QStringLiteral("/a.mp4"));
+    QDir().rmdir(tmpDir);
+  }
+
+  void test_hyphen_keys_converts_all_hyphens() {
+    auto *ctrl = m_player->m_ctrl;
+
+    QVariantMap raw;
+    raw[QStringLiteral("id")] = 1;
+    raw[QStringLiteral("codec-desc-long")] = QStringLiteral("H.264 High");
+    raw[QStringLiteral("demux-samplerate-actual")] = 48000;
+
+    emit ctrl->propertyChanged(QStringLiteral("track-list"),
+                               QVariant(QVariantList{raw}));
+
+    QVariantList tracks = m_player->trackList();
+    QCOMPARE(tracks.size(), 1);
+    QVariantMap m = tracks.at(0).toMap();
+
+    QVERIFY(m.contains(QStringLiteral("trackId")));
+    QVERIFY(m.contains(QStringLiteral("codecDescLong")));
+    QVERIFY(m.contains(QStringLiteral("demuxSamplerateActual")));
+    // Confirm no residual hyphen keys leak through
+    QVERIFY(!m.contains(QStringLiteral("codec-desc-long")));
+    QVERIFY(!m.contains(QStringLiteral("demux-samplerate-actual")));
+    QVERIFY(!m.contains(QStringLiteral("codecDesc-long")));
+  }
+
+  void test_metadata_stored_as_variant_map() {
+    auto *ctrl = m_player->m_ctrl;
+
+    QSignalSpy spy(m_player, &MpvPlayer::metadataChanged);
+
+    QVariantMap raw;
+    raw[QStringLiteral("title")] = QStringLiteral("Sample");
+    raw[QStringLiteral("year")] = 2024;
+    emit ctrl->propertyChanged(QStringLiteral("metadata"), QVariant(raw));
+
+    QCOMPARE(spy.count(), 1);
+    QVariantMap out = m_player->metadata();
+    QCOMPARE(out.value(QStringLiteral("title")).toString(),
+             QStringLiteral("Sample"));
+    QCOMPARE(out.value(QStringLiteral("year")).toInt(), 2024);
+
+    // Same content shouldn't re-emit
+    emit ctrl->propertyChanged(QStringLiteral("metadata"), QVariant(raw));
+    QCOMPARE(spy.count(), 1);
+  }
+
+  // -- Tier D regression tests
+
+  void test_ready_signal_triggers_syncProperties() {
+    QVERIFY(!m_player->m_rendererInitialized);
+
+    // Emit MpvAbstractItem::ready() to simulate render context up
+    emit m_player->ready();
+
+    QVERIFY(m_player->m_rendererInitialized);
+    // syncProperties consumed the constructor-seeded dirty set
+    QVERIFY(m_player->m_dirtyProperties.isEmpty());
+  }
+
+  void test_ready_signal_flushes_deferred_load() {
+    // load() before init queues a deferred action
+    m_player->load(QStringLiteral("/tmp/deferred.mp4"));
+    QVERIFY(!m_player->m_deferredInitActions.isEmpty());
+    QCOMPARE(m_mockCtrl->m_commandCount, 0);
+
+    emit m_player->ready();
+
+    // Deferred load ran through the controller
+    QVERIFY(m_mockCtrl->m_commandCount >= 1);
+    QCOMPARE(m_mockCtrl->m_lastCommand.at(0), QStringLiteral("loadfile"));
+    QVERIFY(m_player->m_deferredInitActions.isEmpty());
+  }
+
+  // -- Tier B regression tests
+
+  void test_setProperty_raw_routes_through_mock() {
+    m_mockCtrl->reset();
+    m_player->setProperty(QStringLiteral("scale"), QStringLiteral("ewa_lanczos"));
+    QCOMPARE(m_mockCtrl->m_rawSetPropertyCount, 1);
+    QCOMPARE(m_mockCtrl->m_lastRawSetProperty, QStringLiteral("scale"));
+    QCOMPARE(m_mockCtrl->m_lastRawSetValue,
+             QStringLiteral("ewa_lanczos"));
+    // Must not have hit the typed setProperty path
+    QCOMPARE(m_mockCtrl->m_setPropertyCount, 0);
+  }
+
+  void test_hwdec_flows_via_syncProperties_not_eagerly() {
+    // Fresh player: mock should NOT have received hwdec yet
+    QCOMPARE(m_mockCtrl->m_setPropertyCount, 0);
+    QVERIFY(m_player->m_dirtyProperties.contains("hwdec"));
+
+    m_player->syncProperties();
+    // After sync, hwdec must have been pushed to the controller
+    bool sawHwdec = false;
+    // m_lastSetProperty is only the last; we count via multiple calls
+    // by checking the pending was consumed:
+    QVERIFY(!m_player->m_dirtyProperties.contains("hwdec"));
+    QVERIFY(m_mockCtrl->m_setPropertyCount >= 1);
+    // Not strictly required to be last; but we can also verify by
+    // resetting and syncing just hwdec:
+    m_mockCtrl->reset();
+    m_player->m_dirtyProperties.clear();
+    m_player->m_dirtyProperties.insert(QStringLiteral("hwdec"));
+    m_player->m_pendingProperties[QStringLiteral("hwdec")] =
+        QStringLiteral("vaapi");
+    m_player->syncProperties();
+    QCOMPARE(m_mockCtrl->m_lastSetProperty, QStringLiteral("hwdec"));
+    QCOMPARE(m_mockCtrl->m_lastSetValue.toString(),
+             QStringLiteral("vaapi"));
+    sawHwdec = true;
+    QVERIFY(sawHwdec);
+  }
+
+  void test_fillMode_sets_real_mpv_props_after_sync() {
+    m_mockCtrl->reset();
+    m_player->m_dirtyProperties.clear();
+    m_player->m_pendingProperties.clear();
+
+    // Set to preserveAspectCrop => panscan 1.0, keepaspect yes
+    m_player->setFillMode(QStringLiteral("preserveAspectCrop"));
+    QVERIFY(m_player->m_dirtyProperties.contains("keepaspect"));
+    QVERIFY(m_player->m_dirtyProperties.contains("panscan"));
+    // No synthetic "fillMode" key should leak into pending
+    QVERIFY(!m_player->m_pendingProperties.contains("fillMode"));
+    QCOMPARE(m_player->m_pendingProperties.value("panscan").toDouble(), 1.0);
+
+    m_player->syncProperties();
+    // keepaspect + panscan both pushed
+    QCOMPARE(m_mockCtrl->m_setPropertyCount, 2);
+    // panscan is applied second; last-set reflects it
+    QCOMPARE(m_mockCtrl->m_lastSetProperty, QStringLiteral("panscan"));
+    QCOMPARE(m_mockCtrl->m_lastSetValue.toDouble(), 1.0);
+  }
+
+  void test_volume_observer_ignores_subepsilon_drift() {
+    auto *ctrl = m_player->m_ctrl;
+    QSignalSpy spy(m_player, &MpvPlayer::volumeChanged);
+
+    emit ctrl->propertyChanged(QStringLiteral("volume"),
+                               QVariant(50.0));
+    QCOMPARE(spy.count(), 1);
+
+    // Sub-epsilon drift: no signal
+    emit ctrl->propertyChanged(QStringLiteral("volume"),
+                               QVariant(50.0 + 1e-15));
+    QCOMPARE(spy.count(), 1);
+
+    // Real change: signal
+    emit ctrl->propertyChanged(QStringLiteral("volume"),
+                               QVariant(60.0));
+    QCOMPARE(spy.count(), 2);
+  }
+
+  void test_audio_delay_observer_zero_handling() {
+    auto *ctrl = m_player->m_ctrl;
+    QSignalSpy spy(m_player, &MpvPlayer::audioDelayChanged);
+
+    // From default 0.0, receiving 0.0 again must not emit
+    emit ctrl->propertyChanged(QStringLiteral("audio-delay"),
+                               QVariant(0.0));
+    QCOMPARE(spy.count(), 0);
+
+    emit ctrl->propertyChanged(QStringLiteral("audio-delay"),
+                               QVariant(0.25));
+    QCOMPARE(spy.count(), 1);
+  }
+
+  void test_hook_manager_hookAdd_noop_without_setup() {
+    MpvHookManager mgr;
+    // No setupHookClient() called => m_hookClient is null.
+    // Must not crash or advance any internal counter observably.
+    mgr.hookAdd(QStringLiteral("on_load"), 0);
+    mgr.hookContinue(1);
+    QVERIFY(true);
   }
 
 private:
