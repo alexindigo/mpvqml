@@ -4,6 +4,62 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-10-29
+
+### Changed (breaking)
+
+- `MpvPlayer` now derives directly from `QQuickFramebufferObject`; the MpvQt
+  `MpvAbstractItem` base is gone. Rebuild C++ consumers against the new headers
+  and `libmpvqml.so.0.2` ABI.
+- `commandAsync(params)` returns an allocated positive request ID. Negative
+  returns reject immediately without a completion; caller-supplied IDs are
+  removed. `asyncCommandFinished(id, error, result)` carries the owned result.
+- Raw libmpv `setProperty(name, value)` and blocking generic reads are removed.
+  Use `setMpvPropertyAsync` / `readMpvPropertyAsync` and their distinct
+  `mpvPropertySetFinished` / `mpvPropertyReadFinished` signals. Typed media
+  properties remain available.
+- Hook IDs (`hookTriggered`, `hookContinue`) are `quint64`, separate from
+  allocated async request IDs.
+- MpvQt is no longer a dependency. The backend uses Qt 6 Core/Gui/Quick/OpenGL
+  and libmpv directly; the QML module remains `MpvQml` version 1.0.
+
+### Added
+
+- Observable core/render lifecycle: `coreAvailable`, `initializationError`,
+  `initializationErrorString`, `rendererReady`, `renderError`,
+  `renderErrorString`; `initializationFailed`, `renderingFailed` and
+  `operationFailed` signals; idempotent `shutdown()`.
+- Native fault, lifetime, renderer and installed-consumer regression coverage,
+  including deterministic libmpv scaler-LUT poisoning.
+
+### Fixed
+
+- Core creation/initialization and render-context failures no longer abort or
+  crash the process. Unsupported Qt Quick graphics APIs report render failure.
+- Native redraw callbacks no longer access the player item from libmpv threads.
+- Converted command/property nodes are released with matching ownership, and
+  flag properties use libmpv's integer representation.
+- Reentrant log-level changes and player deletion with live log/hook clients
+  no longer wedge delivery or helper teardown.
+- Player/window destruction no longer joins outstanding screenshot file I/O
+  or final native core termination. Renderer recreation can restore the same
+  playlist entry, position and pause state without overriding newer intent.
+- A guarded GL upload boundary handles uninitialized scaler-LUT padding in
+  libmpv 0.41.0 that could otherwise cause intermittent persistent black video.
+  See `UPSTREAM.md` for the workaround's scope and removal condition.
+- The installed QML plugin uses a prefix-relative RUNPATH, without build-tree
+  paths; relocated QML and public-header consumers are tested independently.
+- Examples display media-derived text as plain text, preventing embedded
+  markup from triggering image URL fetches. The API documents untrusted text.
+- Native and QML filesystem fixtures use private temporary directories,
+  preventing predictable-path collisions and symlink-followed truncation.
+
+### License
+
+- Derived private-backend material from MpvQt v1.2.0 selects LGPL-3.0-only
+  (see `UPSTREAM.md`); original mpvqml code remains GPLv3. Distributions include
+  the provenance, license text and corresponding module source/build inputs.
+
 ## [0.1.1] — 2026-07-19
 
 ### Fixed
