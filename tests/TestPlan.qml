@@ -1,6 +1,7 @@
 import QtQuick
 import QtTest
 import MpvQml 1.0
+import MpvQml.TestSupport 1.0
 
 TestCase {
     name: "MpvPlayer_CompleteApi_RegressionSuite"
@@ -8,9 +9,13 @@ TestCase {
     width: 640
     height: 480
 
-    Component {
-        id: testFixtureBlueprint
-        Item {
+    TemporaryDirectory { id: fixtureDirectory }
+
+    function initTestCase() {
+        verify(fixtureDirectory.valid)
+    }
+
+    component PlayerFixture: Item {
             anchors.fill: parent
 
             MpvPlayer {
@@ -50,6 +55,7 @@ TestCase {
             property alias playbackEndedSpy: _playbackEndedSpy
             property alias errorOccurredSpy: _errorOccurredSpy
             property alias logMessageSpy: _logMessageSpy
+            property alias commandSpy: _commandSpy
 
             // Core Property Change Spy Components
             SignalSpy { id: _sourceSpy; target: targetPlayer; signalName: "sourceChanged" }
@@ -91,7 +97,12 @@ TestCase {
             SignalSpy { id: _playbackEndedSpy; target: targetPlayer; signalName: "playbackEnded" }
             SignalSpy { id: _errorOccurredSpy; target: targetPlayer; signalName: "errorOccurred" }
             SignalSpy { id: _logMessageSpy; target: targetPlayer; signalName: "logMessage" }
-        }
+            SignalSpy { id: _commandSpy; target: targetPlayer; signalName: "asyncCommandFinished" }
+    }
+
+    Component {
+        id: testFixtureBlueprint
+        PlayerFixture {}
     }
 
     Loader {
@@ -99,13 +110,14 @@ TestCase {
         anchors.fill: parent
     }
 
-    readonly property var fixture: fixtureLoader.item
-    readonly property var player: fixtureLoader.item ? fixtureLoader.item.corePlayer : null
+    readonly property PlayerFixture fixture: fixtureLoader.item as PlayerFixture
+    readonly property MpvPlayer player: fixture ? fixture.corePlayer : null
 
     function init() {
         fixtureLoader.active = false
         fixtureLoader.sourceComponent = testFixtureBlueprint
         fixtureLoader.active = true
+        player.screenshotDirectory = fixtureDirectory.path
     }
 
     function loadTestAssetInstance() {
@@ -133,8 +145,8 @@ TestCase {
         player.fillMode = "stretch"
         compare(player.fillMode, "stretch")
 
-        player.screenshotDirectory = "file:///tmp/mpvqml_screenshots"
-        compare(player.screenshotDirectory, "/tmp/mpvqml_screenshots")
+        player.screenshotDirectory = "file://" + fixtureDirectory.path
+        compare(player.screenshotDirectory, fixtureDirectory.path)
     }
 
     function test_02_volume_and_mute_bounds() {
@@ -172,8 +184,9 @@ TestCase {
         player.hwdec = "vaapi"
         compare(player.hwdec, "vaapi")
 
-        player.userShaders = "file:///no/need/to/exist/upscale_shader.glsl"
-        compare(player.userShaders, "file:///no/need/to/exist/upscale_shader.glsl")
+        const shader = "file://" + fixtureDirectory.path + "/missing-upscale.glsl"
+        player.userShaders = shader
+        compare(player.userShaders, shader)
     }
 
     function test_05_network_streaming_and_ytdl_engine() {
@@ -281,7 +294,11 @@ TestCase {
         player.sendMousePosition(240, 180)
         player.sendMouseClick(1, true)
         player.sendMouseClick(1, false)
-        player.screenshot("video")
+        const request = player.commandAsync(["screenshot", "video"])
+        verify(request > 0)
+        tryCompare(fixture.commandSpy, "count", 1)
+        compare(fixture.commandSpy.signalArguments[0][0], request)
+        compare(fixture.commandSpy.signalArguments[0][1], 0)
     }
 
     function test_16_diagnostic_logging_and_error_propagation() {
@@ -292,9 +309,9 @@ TestCase {
     }
 
     function test_17_uninitialized_player() {
-        let rawUninitializedPlayer = Qt.createQmlObject('import MpvQml 1.0; MpvPlayer {}', fixtureLoader.parent);
+        let rawUninitializedPlayer = Qt.createQmlObject('import MpvQml 1.0; MpvPlayer {}', fixtureLoader.parent) as MpvPlayer;
         verify(rawUninitializedPlayer !== null)
-        rawUninitializedPlayer.load("file:///mock/track.mp4", "replace")
+        rawUninitializedPlayer.load("file://" + fixtureDirectory.path + "/missing-track.mp4", "replace")
         rawUninitializedPlayer.stop(true)
         rawUninitializedPlayer.destroy()
     }
@@ -431,8 +448,8 @@ TestCase {
     // Scenario 32: layout extensions, toggles, and equalizers
     function test_32_extended_cinematic_api_surface() {
         // Set these before updatePaintNode() first runs
-        player.screenshotDirectory = "/tmp"
-        player.userShaders = "/no/need/to/exist/test_shader.glsl"
+        player.screenshotDirectory = fixtureDirectory.path
+        player.userShaders = fixtureDirectory.path + "/missing-shader.glsl"
 
         loadTestAssetInstance()
 

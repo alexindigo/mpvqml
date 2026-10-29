@@ -415,6 +415,7 @@ private:
     delete player;
     window.reset();
     const qint64 elapsed = teardown.elapsed();
+    qInfo() << "screenshot teardown elapsed ms" << elapsed << "fifo" << fifo;
     QVERIFY2(elapsed < 250, "player/window deletion waited for screenshot file I/O");
     int heartbeat = 0;
     QTimer timer;
@@ -451,6 +452,8 @@ private:
   }
 
   void unavailablePlayer(int expectedError) {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
     {
       MpvPlayer player;
       QSignalSpy failure(&player, &MpvPlayer::initializationFailed);
@@ -462,7 +465,7 @@ private:
       QTRY_COMPARE(failure.size(), 1);
       QCOMPARE(failure[0][0].toInt(), expectedError);
       player.load(QStringLiteral("unavailable.mp4"));
-      player.loadDirectory(QStringLiteral("/tmp"));
+      player.loadDirectory(directory.path());
       player.stop(false);
       player.setPaused(true);
       player.setVolume(75);
@@ -470,7 +473,7 @@ private:
       player.hookAdd(QStringLiteral("on_load"));
       player.hookContinue(1);
       player.screenshot();
-      player.loadConfigFile(QStringLiteral("/tmp/unavailable.conf"));
+      player.loadConfigFile(directory.filePath(QStringLiteral("unavailable.conf")));
       player.setRenderParameter(QStringLiteral("ambient-light"), 10);
       QCOMPARE(player.commandAsync(QStringList{"stop"}), MPV_ERROR_UNINITIALIZED);
       QCOMPARE(player.setMpvPropertyAsync(QStringLiteral("pause"), true), MPV_ERROR_UNINITIALIZED);

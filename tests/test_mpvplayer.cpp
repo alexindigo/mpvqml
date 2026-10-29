@@ -4,6 +4,7 @@
 #include <QtCore/QDir>
 #include <QtCore/QEventLoop>
 #include <QtCore/QFile>
+#include <QtCore/QTemporaryDir>
 #include <QtCore/QTimer>
 #include <QtCore/qmetaobject.h>
 #include <QtQml/qqmlparserstatus.h>
@@ -234,8 +235,10 @@ private slots:
   }
 
   void test_deferred_load_directory() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
     m_player->m_rendererInitialized = false;
-    m_player->loadDirectory(QDir::currentPath());
+    m_player->loadDirectory(directory.path());
     emit m_player->ready();
     QVERIFY(m_player->m_deferredInitActions.isEmpty());
     // smoke test: no crash
@@ -253,7 +256,9 @@ private slots:
 
   void test_load_directory_sorting() {
     m_player->m_rendererInitialized = true;
-    QString activeExecutionDir = QDir::currentPath();
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString activeExecutionDir = directory.path();
 
     // Write two separate mock items so the directory parser loops twice
     QFile mockVideo1(activeExecutionDir +
@@ -261,14 +266,12 @@ private slots:
     QFile mockVideo2(activeExecutionDir +
                      QStringLiteral("/mock_test_item2.mp4"));
 
-    if (mockVideo1.open(QIODevice::WriteOnly)) {
-      mockVideo1.write("payload1");
-      mockVideo1.close();
-    }
-    if (mockVideo2.open(QIODevice::WriteOnly)) {
-      mockVideo2.write("payload2");
-      mockVideo2.close();
-    }
+    QVERIFY(mockVideo1.open(QIODevice::WriteOnly));
+    QCOMPARE(mockVideo1.write("payload1"), 8);
+    mockVideo1.close();
+    QVERIFY(mockVideo2.open(QIODevice::WriteOnly));
+    QCOMPARE(mockVideo2.write("payload2"), 8);
+    mockVideo2.close();
 
     // Handles the second item iteration (append-play)
     m_player->loadDirectory(activeExecutionDir, QStringList{},
@@ -280,7 +283,7 @@ private slots:
 
     m_player->loadDirectory(activeExecutionDir, QStringList{},
                             QStringLiteral("append"), QStringLiteral("size"));
-    m_player->loadDirectory(QStringLiteral("/invalid/path"));
+    m_player->loadDirectory(directory.filePath(QStringLiteral("missing")));
 
     // Targets a dummy extension inside a valid folder to force an empty file list return
     m_player->loadDirectory(
@@ -294,7 +297,7 @@ private slots:
 
     m_player->loadDirectory(activeExecutionDir, QStringList{},
                             QStringLiteral("append"), QStringLiteral("size"));
-    m_player->loadDirectory(QStringLiteral("/invalid/path"));
+    m_player->loadDirectory(directory.filePath(QStringLiteral("missing")));
 
     // Clean up mock files
     mockVideo1.remove();
@@ -1023,8 +1026,9 @@ private slots:
   void test_load_directory_append_mode_first_item_appends() {
     m_player->m_rendererInitialized = true;
 
-    QString tmpDir = QDir::tempPath() + QStringLiteral("/mpvqml_ldir_append");
-    QDir().mkpath(tmpDir);
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString tmpDir = directory.path();
     QFile f(tmpDir + QStringLiteral("/a.mp4"));
     QVERIFY(f.open(QIODevice::WriteOnly)); f.close();
 
@@ -1034,8 +1038,6 @@ private slots:
     QCOMPARE(m_mockCtrl->m_lastCommand.at(0), QStringLiteral("loadfile"));
     QCOMPARE(m_mockCtrl->m_lastCommand.at(2), QStringLiteral("append"));
 
-    QFile::remove(tmpDir + QStringLiteral("/a.mp4"));
-    QDir().rmdir(tmpDir);
   }
 
   void test_hyphen_keys_converts_all_hyphens() {

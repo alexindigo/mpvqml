@@ -103,6 +103,16 @@ if(BUILD_TEST_MODE)
   find_package(Qt6 REQUIRED COMPONENTS Test)
   enable_language(C)
 
+  # Filesystem ownership for the QML suite stays in a test-only module.
+  qt_add_qml_module(mpvqml_test_support
+      URI MpvQml.TestSupport
+      VERSION 1.0
+      OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/MpvQml/TestSupport
+      SOURCES tests/temporary_directory.h
+  )
+  target_include_directories(mpvqml_test_support PRIVATE tests)
+  target_link_libraries(mpvqml_test_support PRIVATE Qt6::Core Qt6::Qml)
+
   add_executable(mpvqml_cpp_tests
         tests/test_mpvplayer.cpp
         tests/mock_mpvcontroller.cpp
