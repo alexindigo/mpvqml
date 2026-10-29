@@ -31,7 +31,10 @@ Core availability and renderer readiness are separate. Only a successfully
 created native context and valid FBO publish `ready()`. The attached window's
 actual graphics API is inspected after scene-graph initialization; unsupported
 backends report a render failure without changing the consumer's graphics API.
-Construction-time typed intent is retained until readiness flushes it. Deferred
+Typed intent is retained whenever the core is available, including across a
+failed render attempt, until a successful renderer generation flushes it.
+Loads, directory loads, track selections and mouse positions share deferred
+renderer admission; core commands remain independent of render failures. Deferred
 actions are detached before iteration, rechecked after external delivery, and
 cancelled by stop/source/navigation/shutdown interest changes.
 

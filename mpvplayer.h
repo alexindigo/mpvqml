@@ -263,6 +263,7 @@ private:
     void failOperation(const QString &operation, int error);
     quint64 propertyIntent(const QString &name, const QVariant &value);
     void flushProperty(const QString &name, quint64 revision);
+    bool deferUntilRendererReady(const QString &operation, std::function<void()> retry);
     void submitProperty(const QString &name, const QVariant &value);
     void submitCommand(const QStringList &params);
     void rendererStatus(quint64 generation, bool ready, int error, const QString &message);

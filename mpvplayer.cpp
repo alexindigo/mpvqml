@@ -112,7 +112,7 @@ MpvPlayer::MpvPlayer(QQuickItem *parent, MpvControllerIface *ctrl)
     connect(m_ctrl, &MpvControllerIface::propertyChanged, this,
             [this](const QString &name, const QVariant &value) {
         if (m_shuttingDown) return;
-        if (!m_rendererInitialized && m_pendingProperties.contains(name)) return;
+        if ((!m_rendererInitialized || m_renderError < 0) && m_pendingProperties.contains(name)) return;
         const auto handler = m_propertyHandlers.value(name); // copy before reentrant delivery
         if (handler) handler(value);
     });
@@ -264,9 +264,8 @@ void MpvPlayer::rendererStatus(quint64 generation, bool readyValue, int error, c
         if (!alive || m_shuttingDown) return;
     }
     if (error < 0) {
-        m_deferredInitActions.clear();
-        m_dirtyProperties.clear();
-        m_pendingProperties.clear();
+        // A failed render attempt does not retire the core or caller intent.
+        // A later scene-graph generation can create a successful renderer.
         emit renderingFailed(error, ownedMessage);
         if (alive) emitError(error, ownedMessage);
         return;
@@ -343,7 +342,7 @@ void MpvPlayer::setupPropertyObservers() {
 
 quint64 MpvPlayer::propertyIntent(const QString &name, const QVariant &value) {
     const quint64 revision = ++m_propertyRevisions[name];
-    if (!m_shuttingDown && coreAvailable() && m_renderError >= 0) {
+    if (coreAvailable()) {
         m_pendingProperties.insert(name, value);
         m_dirtyProperties.insert(name);
     }
@@ -352,8 +351,8 @@ quint64 MpvPlayer::propertyIntent(const QString &name, const QVariant &value) {
 
 void MpvPlayer::flushProperty(const QString &name, quint64 revision) {
     if (m_propertyRevisions.value(name) != revision) return;
-    if (!coreAvailable() || m_renderError < 0) { failOperation(name, !coreAvailable() ? MPV_ERROR_UNINITIALIZED : m_renderError); return; }
-    if (!m_rendererInitialized) return;
+    if (!coreAvailable()) { failOperation(name, MPV_ERROR_UNINITIALIZED); return; }
+    if (!m_rendererInitialized || m_renderError < 0) return;
     const QVariant value = m_pendingProperties.take(name);
     m_dirtyProperties.remove(name);
     submitProperty(name, value);
@@ -456,7 +455,6 @@ void MpvPlayer::submitProperty(const QString &name, const QVariant &value) {
 }
 void MpvPlayer::submitCommand(const QStringList &params) {
     const QString operation = params.isEmpty() ? QStringLiteral("command") : params[0];
-    if (m_renderError < 0) { failOperation(operation, m_renderError); return; }
     const int id = coreAvailable() && m_ctrl ? m_ctrl->commandAsync(params) : MPV_ERROR_UNINITIALIZED;
     if (id < 0) failOperation(operation, id);
     else m_requests.insert(id, {0, false, operation});
@@ -491,24 +489,28 @@ void MpvPlayer::complete(int id, int error, const QVariant &value, int kind) {
     if (alive && error < 0) failOperation(owner.operation, error);
 }
 
+bool MpvPlayer::deferUntilRendererReady(const QString &operation, std::function<void()> retry) {
+    if (!coreAvailable()) { failOperation(operation, MPV_ERROR_UNINITIALIZED); return true; }
+    if (!m_rendererInitialized || m_renderError < 0) {
+        const quint64 revision = m_mediaRevision;
+        m_deferredInitActions.append([this, revision, retry = std::move(retry)]() {
+            if (revision == m_mediaRevision) retry();
+        });
+        return true;
+    }
+    return false;
+}
+
 void MpvPlayer::load(const QString &url, const QString &mode) {
     if (url.isEmpty()) return;
-    if (!coreAvailable() || m_renderError < 0) { failOperation(QStringLiteral("load"), !coreAvailable() ? MPV_ERROR_UNINITIALIZED : m_renderError); return; }
-    if (!m_rendererInitialized) {
-        const quint64 revision = m_mediaRevision;
-        m_deferredInitActions.append([this, revision, url, mode]() { if (revision == m_mediaRevision) load(url, mode); });
-        return;
-    }
+    if (deferUntilRendererReady(QStringLiteral("load"), [this, url, mode]() { load(url, mode); })) return;
     submitCommand(QStringList{"loadfile", cleanPath(url), mode});
 }
 void MpvPlayer::loadDirectory(const QString &path, const QStringList &fileFilters, const QString &mode, const QString &sort) {
     if (path.isEmpty()) return;
-    if (!coreAvailable() || m_renderError < 0) { failOperation(QStringLiteral("loadDirectory"), !coreAvailable() ? MPV_ERROR_UNINITIALIZED : m_renderError); return; }
-    if (!m_rendererInitialized) {
-        const quint64 revision = m_mediaRevision;
-        m_deferredInitActions.append([this, revision, path, fileFilters, mode, sort]() { if (revision == m_mediaRevision) loadDirectory(path, fileFilters, mode, sort); });
-        return;
-    }
+    if (deferUntilRendererReady(QStringLiteral("loadDirectory"), [this, path, fileFilters, mode, sort]() {
+        loadDirectory(path, fileFilters, mode, sort);
+    })) return;
     const QString directoryPath = cleanPath(path);
     if (!QFileInfo(directoryPath).isDir()) return;
     QStringList filters = fileFilters;
@@ -555,12 +557,12 @@ void MpvPlayer::addAudioTrack(const QString &url) { if (!url.isEmpty()) submitCo
 void MpvPlayer::addVideoTrack(const QString &url) { if (!url.isEmpty()) submitCommand(QStringList{"video-add", cleanPath(url)}); }
 void MpvPlayer::addSubtitleTrack(const QString &url) { if (!url.isEmpty()) submitCommand(QStringList{"sub-add", cleanPath(url)}); }
 void MpvPlayer::selectTrack(const QString &type, int id) {
-    if (!m_rendererInitialized) return;
     QString name;
     if (type == "audio") name = QStringLiteral("aid");
     else if (type == "video") name = QStringLiteral("vid");
     else if (type == "sub" || type == "subtitle") name = QStringLiteral("sid");
     if (name.isEmpty()) return;
+    if (deferUntilRendererReady(QStringLiteral("selectTrack"), [this, type, id]() { selectTrack(type, id); })) return;
     QPointer<MpvPlayer> alive(this);
     submitProperty(name, id <= 0 ? QVariant(QStringLiteral("no")) : QVariant(id));
     if (alive && !m_shuttingDown && type == "video" && !m_source.isEmpty()) { m_pendingTrackSeek = m_position; load(m_source); }
@@ -579,7 +581,7 @@ void MpvPlayer::runExternalProcess(const QStringList &arguments) { if (!argument
 void MpvPlayer::sendScriptMessage(const QStringList &arguments) { if (!arguments.isEmpty()) submitCommand(QStringList{"script-message"} + arguments); }
 void MpvPlayer::triggerScriptBinding(const QString &name) { if (!name.isEmpty()) submitCommand(QStringList{"script-binding", name}); }
 void MpvPlayer::sendMousePosition(int x, int y) {
-    if (!m_rendererInitialized) return;
+    if (deferUntilRendererReady(QStringLiteral("sendMousePosition"), [this, x, y]() { sendMousePosition(x, y); })) return;
     QPointer<MpvPlayer> alive(this);
     submitProperty(QStringLiteral("mouse-pos/x"), x);
     if (alive && !m_shuttingDown) submitProperty(QStringLiteral("mouse-pos/y"), y);

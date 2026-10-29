@@ -9,6 +9,7 @@
 #include <QTemporaryDir>
 #include <QFileInfo>
 #include <QFile>
+#include <QDir>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QSignalSpy>
@@ -77,6 +78,8 @@ private slots:
     if (fixtureName == "publicCoreInitializationFailure") flags = FaultInitialize;
     if (fixtureName == "publicWorkerStartupFailure") failThread = 3;
     if (fixtureName == "publicRenderFailure") flags = FaultRenderCreate;
+    if (fixtureName == "publicRenderFailureRecoversCallerIntent"
+        || fixtureName == "publicRenderFailureRetainsInitialIntent") flags = FaultRenderCreate;
     if (fixtureName == "ordinaryFileScreenshotRetirement") flags = FaultFileBarrier;
     if (fixtureName == "synchronousHelperRegistration") flags = FaultSynchronousWakeup;
     if (fixtureName == "recycledHelperAddressRejectsOldWakeups") flags = FaultSynchronousWakeup;
@@ -317,6 +320,9 @@ private slots:
     exercised();
   }
 
+  void publicRenderFailureRecoversCallerIntent() { renderFailureRecovery(true); }
+  void publicRenderFailureRetainsInitialIntent() { renderFailureRecovery(false); }
+
   void recycledHelperAddressRejectsOldWakeups() {
     auto player = std::make_unique<MpvPlayer>();
     QVERIFY(player->coreAvailable());
@@ -378,6 +384,83 @@ private slots:
   }
 
 private:
+  void renderFailureRecovery(bool replaceSource) {
+    QQuickWindow window;
+    window.resize(160, 120);
+    window.setPersistentSceneGraph(false);
+    window.setPersistentGraphics(false);
+    auto *player = new MpvPlayer(window.contentItem());
+    player->setSize(window.size());
+    connect(&window, &QQuickWindow::widthChanged, player, [player](int value) { player->setWidth(value); });
+    connect(&window, &QQuickWindow::heightChanged, player, [player](int value) { player->setHeight(value); });
+    player->setHwdec("no");
+    player->setLoopFile("inf");
+    player->setVolume(64);
+    player->setSource(QStringLiteral(MPVQML_CRASH_VIDEO));
+    QSignalSpy failed(player, &MpvPlayer::renderingFailed);
+    QSignalSpy ready(player, &MpvPlayer::ready);
+    QSignalSpy loaded(player, &MpvPlayer::fileLoaded);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QTRY_COMPARE(failed.size(), 1);
+    QVERIFY(player->coreAvailable());
+    QVERIFY(!player->rendererReady());
+    QCOMPARE(player->renderError(), MPV_ERROR_UNSUPPORTED);
+    QCOMPARE(ready.size(), 0);
+    QCOMPARE(faults.counter(FaultRenderCreates), 1L);
+    if (replaceSource) {
+      player->setVolume(36);
+      player->setPaused(true);
+      player->setPlaybackSpeed(0.75);
+      player->setFillMode("stretch");
+      player->setSource(QFileInfo(QStringLiteral(MPVQML_CRASH_VIDEO)).dir().filePath("test_two_video.mp4"));
+    }
+    faults.configure(0, 0);
+    window.hide();
+    window.releaseResources();
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QTRY_VERIFY_WITH_TIMEOUT(player->rendererReady(), 5000);
+    QCOMPARE(player->renderError(), MPV_ERROR_SUCCESS);
+    QCOMPARE(ready.size(), 1);
+    QCOMPARE(faults.counter(FaultRenderCreates), 2L);
+    QTRY_VERIFY_WITH_TIMEOUT(loaded.size() >= 1, 5000);
+    auto expectedPixels = [&]() {
+      const QImage image = window.grabWindow();
+      if (image.isNull()) return false;
+      const QColor pixel = image.pixelColor(image.width()/2, image.height()/2);
+      return replaceSource ? pixel.red() > 150 && pixel.blue() < 80
+                           : pixel.blue() > 150 && pixel.red() < 80;
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(expectedPixels(), 5000);
+    QSignalSpy reads(player, &MpvPlayer::mpvPropertyReadFinished);
+    const QStringList properties{"volume", "pause", "speed", "hwdec", "tscale", "keepaspect"};
+    QMap<int, QString> requests;
+    for (const QString &name : properties) {
+      const int id = player->readMpvPropertyAsync(name);
+      QVERIFY(id > 0);
+      requests.insert(id, name);
+    }
+    QTRY_COMPARE(reads.size(), properties.size());
+    QVariantMap values;
+    for (const auto &reply : reads) {
+      QCOMPARE(reply[1].toInt(), MPV_ERROR_SUCCESS);
+      values.insert(requests.value(reply[0].toInt()), reply[2]);
+    }
+    QCOMPARE(values.value("volume").toDouble(), replaceSource ? 36.0 : 64.0);
+    QCOMPARE(values.value("pause").toBool(), replaceSource);
+    QCOMPARE(values.value("speed").toDouble(), replaceSource ? 0.75 : 1.0);
+    // Generic node reads expose this libmpv string-list option as an array.
+    QCOMPARE(values.value("hwdec").toList(), QVariantList{QStringLiteral("no")});
+    QCOMPARE(values.value("tscale").toString(), QStringLiteral("mitchell"));
+    QCOMPARE(values.value("keepaspect").toBool(), !replaceSource);
+    delete player;
+    window.hide();
+    window.releaseResources();
+    QTRY_COMPARE_WITH_TIMEOUT(MpvCoreLease::outstandingReservations(), 0, 5000);
+    exercised();
+  }
+
   void screenshotRetirement(bool fifo) {
     ReleaseBarrier barrier;
     QTemporaryDir directory;
@@ -500,7 +583,8 @@ private slots:
                             "bothWorkersBlockedAndAllLiveLeasesReclaimed", "workerTlsCleanupOutlivesFacade",
                             "moduleUnloadWhileBlocked", "publicCoreCreationFailure",
                             "publicCoreInitializationFailure", "publicWorkerStartupFailure",
-                            "publicRenderFailure", "ordinaryFileScreenshotRetirement", "fifoScreenshotRetirement",
+                            "publicRenderFailure", "publicRenderFailureRecoversCallerIntent",
+                            "publicRenderFailureRetainsInitialIntent", "ordinaryFileScreenshotRetirement", "fifoScreenshotRetirement",
                             "synchronousHelperRegistration", "recycledHelperAddressRejectsOldWakeups", "unsupportedGraphicsBackend"})
       QTest::newRow(name) << QString::fromLatin1(name);
   }

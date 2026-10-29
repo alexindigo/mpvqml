@@ -34,6 +34,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Caller property and media intent survives a recoverable renderer failure and
+  applies when a later renderer generation becomes ready; core-only controls
+  remain available during the failure.
 - Core creation/initialization and render-context failures no longer abort or
   crash the process. Unsupported Qt Quick graphics APIs report render failure.
 - Native redraw callbacks no longer access the player item from libmpv threads.

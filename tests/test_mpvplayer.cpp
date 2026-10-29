@@ -254,6 +254,64 @@ private slots:
     QVERIFY(m_player->m_deferredInitActions.isEmpty());
   }
 
+  void test_renderer_failure_keeps_property_and_action_intent() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    QFile video(directory.filePath("queued.mp4"));
+    QVERIFY(video.open(QIODevice::WriteOnly));
+    video.close();
+    m_player->rendererStatus(0, false, MPV_ERROR_UNSUPPORTED, "fixture render failure");
+    m_mockCtrl->reset();
+    m_player->setVolume(36);
+    emit m_mockCtrl->propertyChanged("volume", 100.0);
+    QCOMPARE(m_player->volume(), 36.0);
+    m_player->setFillMode("stretch");
+    m_player->setSource(directory.filePath("replacement.mp4"));
+    m_player->loadDirectory(directory.path());
+    m_player->selectTrack("audio", 2);
+    m_player->sendMousePosition(12, 34);
+    QCOMPARE(m_mockCtrl->m_setPropertyCount, 0);
+    QCOMPARE(m_mockCtrl->m_commandCount, 0);
+    // Core-only convenience operations remain admitted during render failure.
+    m_player->adjustProperty("volume", 1);
+    QCOMPARE(m_mockCtrl->m_lastCommand, QStringList({"add", "volume", "1"}));
+    m_player->rendererStatus(0, true, MPV_ERROR_SUCCESS, {});
+    QCOMPARE(m_mockCtrl->m_setValues.value("volume").toDouble(), 36.0);
+    QCOMPARE(m_mockCtrl->m_setValues.value("keepaspect").toString(), QStringLiteral("no"));
+    QCOMPARE(m_mockCtrl->m_setValues.value("aid").toInt(), 2);
+    QCOMPARE(m_mockCtrl->m_setValues.value("mouse-pos/x").toInt(), 12);
+    QCOMPARE(m_mockCtrl->m_setValues.value("mouse-pos/y").toInt(), 34);
+    QCOMPARE(m_mockCtrl->m_commands.size(), 3);
+    QCOMPARE(m_mockCtrl->m_commands[1], QStringList({"loadfile", directory.filePath("replacement.mp4"), "replace"}));
+    QCOMPARE(m_mockCtrl->m_commands[2], QStringList({"loadfile", video.fileName(), "replace"}));
+    QVERIFY(m_player->m_deferredInitActions.isEmpty());
+  }
+
+  void test_renderer_failure_still_honors_supersession_data() {
+    QTest::addColumn<QString>("action");
+    for (const char *action : {"stop", "source", "next", "previous", "shutdown"})
+      QTest::newRow(action) << QString::fromLatin1(action);
+  }
+
+  void test_renderer_failure_still_honors_supersession() {
+    QFETCH(QString, action);
+    m_player->rendererStatus(0, false, MPV_ERROR_UNSUPPORTED, "fixture render failure");
+    m_player->setSource("old.mp4");
+    m_player->selectTrack("audio", 2);
+    m_player->sendMousePosition(12, 34);
+    if (action == "stop") m_player->stop(false);
+    if (action == "source") m_player->setSource("new.mp4");
+    if (action == "next") m_player->next();
+    if (action == "previous") m_player->previous();
+    if (action == "shutdown") m_player->shutdown();
+    m_mockCtrl->reset();
+    m_player->rendererStatus(0, true, MPV_ERROR_SUCCESS, {});
+    QCOMPARE(m_mockCtrl->m_commands.size(), action == "source" ? 1 : 0);
+    if (action == "source") QCOMPARE(m_mockCtrl->m_lastCommand, QStringList({"loadfile", "new.mp4", "replace"}));
+    QVERIFY(!m_mockCtrl->m_setValues.contains("aid"));
+    QVERIFY(!m_mockCtrl->m_setValues.contains("mouse-pos/x"));
+  }
+
   void test_load_directory_sorting() {
     m_player->m_rendererInitialized = true;
     QTemporaryDir directory;
