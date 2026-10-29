@@ -496,13 +496,13 @@ bool MpvPlayer::deferUntilRendererReady(const QString &operation, const QString 
         auto guardedRetry = [this, revision, retry = std::move(retry)]() {
             if (revision == m_mediaRevision) retry();
         };
-        // State replaces its original queue slot; commands (empty key) retain
-        // every occurrence. Keeping both in one queue shares all cancellation.
+        // Latest state follows any intervening commands; commands (empty key)
+        // retain every occurrence. One queue shares all cancellation.
         if (!stateKey.isEmpty()) {
-            for (auto &action : m_deferredInitActions) {
-                if (action.stateKey != stateKey) continue;
-                action.retry = std::move(guardedRetry);
-                return true;
+            for (auto it = m_deferredInitActions.begin(); it != m_deferredInitActions.end(); ++it) {
+                if (it->stateKey != stateKey) continue;
+                m_deferredInitActions.erase(it);
+                break;
             }
         }
         m_deferredInitActions.append({stateKey, std::move(guardedRetry)});

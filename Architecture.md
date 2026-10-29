@@ -35,8 +35,9 @@ Typed intent is retained whenever the core is available, including across a
 failed render attempt, until a successful renderer generation flushes it.
 Loads, directory loads, track selections and mouse positions share deferred
 renderer admission; core commands remain independent of render failures. Deferred
-state replaces its original queue slot by canonical key (one mouse position and
-one selection per track type, with sub/subtitle sharing sid); command actions
+state removes its old canonical-key entry and appends the replacement after any
+intervening commands (one mouse position and one selection per track type, with
+sub/subtitle sharing sid); command actions
 such as loads and directory loads retain every occurrence in order. State and
 commands share one queue and its cancellation lifetime. Actions are detached
 before iteration, rechecked after external delivery, and

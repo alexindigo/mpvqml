@@ -38,8 +38,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   applies when a later renderer generation becomes ready; core-only controls
   remain available during the failure.
 - Deferred mouse position and per-track selection retain only the latest value
-  while rendering is unavailable, bounding state-like work without dropping or
-  reordering queued load commands.
+  at the latest call's position while rendering is unavailable, so selections
+  follow intervening loads while state-like work stays bounded and every queued
+  load command retains its order.
 - Core creation/initialization and render-context failures no longer abort or
   crash the process. Unsupported Qt Quick graphics APIs report render failure.
 - Native redraw callbacks no longer access the player item from libmpv threads.

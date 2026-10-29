@@ -349,14 +349,50 @@ private slots:
     m_player->selectTrack("audio", 0);
     m_player->selectTrack("video", 7);
     m_player->sendMousePosition(9, 10);
+    QCOMPARE(m_player->m_deferredInitActions.size(), 8);
     m_player->rendererStatus(0, true, MPV_ERROR_SUCCESS, {});
     const QList<QVariantList> expected{
-      {"set", "mouse-pos/x", 9}, {"set", "mouse-pos/y", 10},
+      {"command", QStringList{"loadfile", "one.mp4", "append"}},
+      {"command", QStringList{"loadfile", video.fileName(), "append"}},
       {"command", QStringList{"loadfile", "one.mp4", "append"}}, {"set", "sid", 9},
       {"command", QStringList{"loadfile", video.fileName(), "append"}}, {"set", "aid", "no"},
-      {"command", QStringList{"loadfile", "one.mp4", "append"}},
-      {"command", QStringList{"loadfile", video.fileName(), "append"}}, {"set", "vid", 7}
+      {"set", "vid", 7}, {"set", "mouse-pos/x", 9}, {"set", "mouse-pos/y", 10}
     };
+    QCOMPARE(m_mockCtrl->m_submissions, expected);
+    QVERIFY(m_player->m_deferredInitActions.isEmpty());
+  }
+
+  void test_replaced_deferred_state_follows_intervening_loads_data() {
+    QTest::addColumn<QString>("type");
+    QTest::addColumn<QString>("key");
+    QTest::newRow("audio") << QString("audio") << QString("aid");
+    QTest::newRow("video") << QString("video") << QString("vid");
+    QTest::newRow("subtitle-alias") << QString("sub") << QString("sid");
+    QTest::newRow("mouse") << QString("mouse") << QString("mouse-pos");
+  }
+
+  void test_replaced_deferred_state_follows_intervening_loads() {
+    QFETCH(QString, type);
+    QFETCH(QString, key);
+    emit m_player->ready();
+    m_player->rendererStatus(0, false, MPV_ERROR_UNSUPPORTED, "fixture render failure");
+    m_mockCtrl->reset();
+    m_player->load("A.mp4", "append");
+    if (type == "mouse") m_player->sendMousePosition(1, -1);
+    else m_player->selectTrack(type, 1);
+    m_player->load("B.mp4", "append");
+    if (type == "mouse") m_player->sendMousePosition(2, -2);
+    else m_player->selectTrack(type == "sub" ? "subtitle" : type, 2);
+    QCOMPARE(m_player->m_deferredInitActions.size(), 3);
+    m_player->rendererStatus(0, true, MPV_ERROR_SUCCESS, {});
+    QList<QVariantList> expected{
+      {"command", QStringList{"loadfile", "A.mp4", "append"}},
+      {"command", QStringList{"loadfile", "B.mp4", "append"}}
+    };
+    if (type == "mouse") {
+      expected.append(QVariantList{"set", "mouse-pos/x", 2});
+      expected.append(QVariantList{"set", "mouse-pos/y", -2});
+    } else expected.append(QVariantList{"set", key, 2});
     QCOMPARE(m_mockCtrl->m_submissions, expected);
     QVERIFY(m_player->m_deferredInitActions.isEmpty());
   }

@@ -128,8 +128,8 @@ occupied by live or still-retiring cores.
 While the core is available, typed properties and source/load intent survive a
 render failure and apply on the next successful renderer generation. Loads,
 directory loads, track selections and mouse positions wait for readiness;
-mouse position and each track type retain only their latest deferred value in
-their original queue position (`sub` and `subtitle` share one selection). Loads
+mouse position and each track type retain only their latest deferred value at
+the latest call's queue position (`sub` and `subtitle` share one selection). Loads
 and directory loads retain every occurrence in order, including append modes.
 Stop/source/navigation/shutdown still cancel superseded deferred actions.
 Explicit async operations and core-only convenience commands remain admitted
