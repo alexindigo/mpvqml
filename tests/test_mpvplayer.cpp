@@ -288,9 +288,82 @@ private slots:
     QVERIFY(m_player->m_deferredInitActions.isEmpty());
   }
 
+  void test_deferred_state_is_bounded_data() {
+    QTest::addColumn<bool>("failed");
+    QTest::newRow("initial-readiness") << false;
+    QTest::newRow("renderer-failure") << true;
+  }
+
+  void test_deferred_state_is_bounded() {
+    QFETCH(bool, failed);
+    if (failed) {
+      emit m_player->ready();
+      m_player->rendererStatus(0, false, MPV_ERROR_UNSUPPORTED, "fixture render failure");
+    }
+    m_mockCtrl->reset();
+    for (int i = 0; i < 10000; ++i) {
+      m_player->sendMousePosition(i, -i);
+      m_player->selectTrack("audio", i + 1);
+      m_player->selectTrack("video", i + 2);
+      m_player->selectTrack(i % 2 ? "sub" : "subtitle", i + 3);
+      m_player->selectTrack("invalid", i);
+      m_player->setVolume(20 + i % 100);
+    }
+    QCOMPARE(m_player->m_deferredInitActions.size(), 4);
+    QCOMPARE(m_mockCtrl->m_setPropertyCount, 0);
+    QCOMPARE(m_mockCtrl->m_commandCount, 0);
+    m_player->rendererStatus(0, true, MPV_ERROR_SUCCESS, {});
+    const QVariantMap latest{{"mouse-pos/x", 9999}, {"mouse-pos/y", -9999},
+                             {"aid", 10000}, {"vid", 10001}, {"sid", 10002}, {"volume", 119.0}};
+    for (auto it = latest.cbegin(); it != latest.cend(); ++it) {
+      int writes = 0;
+      for (const auto &submission : m_mockCtrl->m_submissions) {
+        if (submission[0] == "set" && submission[1] == it.key()) {
+          QCOMPARE(submission[2], it.value());
+          ++writes;
+        }
+      }
+      QCOMPARE(writes, 1);
+    }
+    QVERIFY(m_player->m_deferredInitActions.isEmpty());
+  }
+
+  void test_deferred_state_preserves_command_order() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    QFile video(directory.filePath("queued.mp4"));
+    QVERIFY(video.open(QIODevice::WriteOnly));
+    video.close();
+    emit m_player->ready();
+    m_player->rendererStatus(0, false, MPV_ERROR_UNSUPPORTED, "fixture render failure");
+    m_mockCtrl->reset();
+    m_player->sendMousePosition(1, 2);
+    m_player->load("one.mp4", "append");
+    m_player->selectTrack("sub", 1);
+    m_player->loadDirectory(directory.path(), {}, "append");
+    m_player->selectTrack("audio", 2);
+    m_player->sendMousePosition(3, 4);
+    m_player->load("one.mp4", "append");
+    m_player->selectTrack("subtitle", 9);
+    m_player->loadDirectory(directory.path(), {}, "append");
+    m_player->selectTrack("audio", 0);
+    m_player->selectTrack("video", 7);
+    m_player->sendMousePosition(9, 10);
+    m_player->rendererStatus(0, true, MPV_ERROR_SUCCESS, {});
+    const QList<QVariantList> expected{
+      {"set", "mouse-pos/x", 9}, {"set", "mouse-pos/y", 10},
+      {"command", QStringList{"loadfile", "one.mp4", "append"}}, {"set", "sid", 9},
+      {"command", QStringList{"loadfile", video.fileName(), "append"}}, {"set", "aid", "no"},
+      {"command", QStringList{"loadfile", "one.mp4", "append"}},
+      {"command", QStringList{"loadfile", video.fileName(), "append"}}, {"set", "vid", 7}
+    };
+    QCOMPARE(m_mockCtrl->m_submissions, expected);
+    QVERIFY(m_player->m_deferredInitActions.isEmpty());
+  }
+
   void test_renderer_failure_still_honors_supersession_data() {
     QTest::addColumn<QString>("action");
-    for (const char *action : {"stop", "source", "next", "previous", "shutdown"})
+    for (const char *action : {"stop", "source", "next", "previous", "shutdown", "core-unavailable"})
       QTest::newRow(action) << QString::fromLatin1(action);
   }
 
@@ -298,18 +371,29 @@ private slots:
     QFETCH(QString, action);
     m_player->rendererStatus(0, false, MPV_ERROR_UNSUPPORTED, "fixture render failure");
     m_player->setSource("old.mp4");
-    m_player->selectTrack("audio", 2);
-    m_player->sendMousePosition(12, 34);
+    for (int i = 0; i < 100; ++i) {
+      m_player->selectTrack("audio", i + 1);
+      m_player->selectTrack("video", i + 2);
+      m_player->selectTrack(i % 2 ? "sub" : "subtitle", i + 3);
+      m_player->sendMousePosition(i, -i);
+    }
     if (action == "stop") m_player->stop(false);
     if (action == "source") m_player->setSource("new.mp4");
     if (action == "next") m_player->next();
     if (action == "previous") m_player->previous();
     if (action == "shutdown") m_player->shutdown();
+    if (action == "core-unavailable") {
+      m_mockCtrl->m_available = false;
+      emit m_mockCtrl->coreUnavailable();
+    }
+    QCOMPARE(m_player->m_deferredInitActions.size(), action == "source" ? 1 : 0);
     m_mockCtrl->reset();
     m_player->rendererStatus(0, true, MPV_ERROR_SUCCESS, {});
     QCOMPARE(m_mockCtrl->m_commands.size(), action == "source" ? 1 : 0);
     if (action == "source") QCOMPARE(m_mockCtrl->m_lastCommand, QStringList({"loadfile", "new.mp4", "replace"}));
     QVERIFY(!m_mockCtrl->m_setValues.contains("aid"));
+    QVERIFY(!m_mockCtrl->m_setValues.contains("vid"));
+    QVERIFY(!m_mockCtrl->m_setValues.contains("sid"));
     QVERIFY(!m_mockCtrl->m_setValues.contains("mouse-pos/x"));
   }
 

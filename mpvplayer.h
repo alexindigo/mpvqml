@@ -263,7 +263,7 @@ private:
     void failOperation(const QString &operation, int error);
     quint64 propertyIntent(const QString &name, const QVariant &value);
     void flushProperty(const QString &name, quint64 revision);
-    bool deferUntilRendererReady(const QString &operation, std::function<void()> retry);
+    bool deferUntilRendererReady(const QString &operation, const QString &stateKey, std::function<void()> retry);
     void submitProperty(const QString &name, const QVariant &value);
     void submitCommand(const QStringList &params);
     void rendererStatus(quint64 generation, bool ready, int error, const QString &message);
@@ -310,7 +310,8 @@ private:
     QString m_renderErrorString;
     quint64 m_mediaRevision = 0;
     quint64 m_errorRevision = 0;
-    QVector<std::function<void()>> m_deferredInitActions;
+    struct DeferredInitAction { QString stateKey; std::function<void()> retry; };
+    QVector<DeferredInitAction> m_deferredInitActions;
     QSet<QString> m_dirtyProperties;
     QVariantMap m_pendingProperties;
     QHash<QString, quint64> m_propertyRevisions;

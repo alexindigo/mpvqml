@@ -443,7 +443,7 @@ void MpvPlayer::syncProperties() {
     }
     const auto actions = std::exchange(m_deferredInitActions, {});
     for (const auto &action : actions) {
-        action();
+        action.retry();
         if (!alive || m_shuttingDown || !coreAvailable()) return;
     }
 }
@@ -489,13 +489,23 @@ void MpvPlayer::complete(int id, int error, const QVariant &value, int kind) {
     if (alive && error < 0) failOperation(owner.operation, error);
 }
 
-bool MpvPlayer::deferUntilRendererReady(const QString &operation, std::function<void()> retry) {
+bool MpvPlayer::deferUntilRendererReady(const QString &operation, const QString &stateKey, std::function<void()> retry) {
     if (!coreAvailable()) { failOperation(operation, MPV_ERROR_UNINITIALIZED); return true; }
     if (!m_rendererInitialized || m_renderError < 0) {
         const quint64 revision = m_mediaRevision;
-        m_deferredInitActions.append([this, revision, retry = std::move(retry)]() {
+        auto guardedRetry = [this, revision, retry = std::move(retry)]() {
             if (revision == m_mediaRevision) retry();
-        });
+        };
+        // State replaces its original queue slot; commands (empty key) retain
+        // every occurrence. Keeping both in one queue shares all cancellation.
+        if (!stateKey.isEmpty()) {
+            for (auto &action : m_deferredInitActions) {
+                if (action.stateKey != stateKey) continue;
+                action.retry = std::move(guardedRetry);
+                return true;
+            }
+        }
+        m_deferredInitActions.append({stateKey, std::move(guardedRetry)});
         return true;
     }
     return false;
@@ -503,12 +513,12 @@ bool MpvPlayer::deferUntilRendererReady(const QString &operation, std::function<
 
 void MpvPlayer::load(const QString &url, const QString &mode) {
     if (url.isEmpty()) return;
-    if (deferUntilRendererReady(QStringLiteral("load"), [this, url, mode]() { load(url, mode); })) return;
+    if (deferUntilRendererReady(QStringLiteral("load"), {}, [this, url, mode]() { load(url, mode); })) return;
     submitCommand(QStringList{"loadfile", cleanPath(url), mode});
 }
 void MpvPlayer::loadDirectory(const QString &path, const QStringList &fileFilters, const QString &mode, const QString &sort) {
     if (path.isEmpty()) return;
-    if (deferUntilRendererReady(QStringLiteral("loadDirectory"), [this, path, fileFilters, mode, sort]() {
+    if (deferUntilRendererReady(QStringLiteral("loadDirectory"), {}, [this, path, fileFilters, mode, sort]() {
         loadDirectory(path, fileFilters, mode, sort);
     })) return;
     const QString directoryPath = cleanPath(path);
@@ -562,7 +572,7 @@ void MpvPlayer::selectTrack(const QString &type, int id) {
     else if (type == "video") name = QStringLiteral("vid");
     else if (type == "sub" || type == "subtitle") name = QStringLiteral("sid");
     if (name.isEmpty()) return;
-    if (deferUntilRendererReady(QStringLiteral("selectTrack"), [this, type, id]() { selectTrack(type, id); })) return;
+    if (deferUntilRendererReady(QStringLiteral("selectTrack"), name, [this, type, id]() { selectTrack(type, id); })) return;
     QPointer<MpvPlayer> alive(this);
     submitProperty(name, id <= 0 ? QVariant(QStringLiteral("no")) : QVariant(id));
     if (alive && !m_shuttingDown && type == "video" && !m_source.isEmpty()) { m_pendingTrackSeek = m_position; load(m_source); }
@@ -581,7 +591,7 @@ void MpvPlayer::runExternalProcess(const QStringList &arguments) { if (!argument
 void MpvPlayer::sendScriptMessage(const QStringList &arguments) { if (!arguments.isEmpty()) submitCommand(QStringList{"script-message"} + arguments); }
 void MpvPlayer::triggerScriptBinding(const QString &name) { if (!name.isEmpty()) submitCommand(QStringList{"script-binding", name}); }
 void MpvPlayer::sendMousePosition(int x, int y) {
-    if (deferUntilRendererReady(QStringLiteral("sendMousePosition"), [this, x, y]() { sendMousePosition(x, y); })) return;
+    if (deferUntilRendererReady(QStringLiteral("sendMousePosition"), QStringLiteral("mouse-pos"), [this, x, y]() { sendMousePosition(x, y); })) return;
     QPointer<MpvPlayer> alive(this);
     submitProperty(QStringLiteral("mouse-pos/x"), x);
     if (alive && !m_shuttingDown) submitProperty(QStringLiteral("mouse-pos/y"), y);

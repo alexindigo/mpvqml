@@ -24,6 +24,7 @@ public:
         if (id < 0) return id;
         m_lastCommand = params;
         m_commands.append(params);
+        m_submissions.append(QVariantList{QStringLiteral("command"), params});
         ++m_commandCount;
         m_lastAsyncCommandStringList = params;
         m_lastAsyncId = id;
@@ -41,6 +42,7 @@ public:
         m_lastSetProperty = name;
         m_lastSetValue = value;
         m_setValues.insert(name, value);
+        m_submissions.append(QVariantList{QStringLiteral("set"), name, value});
         ++m_setPropertyCount;
         if (m_autoComplete) {
             const int error = m_replyError;
@@ -76,7 +78,7 @@ public:
     }
     void reset() {
         m_lastSetProperty.clear(); m_lastSetValue = {}; m_setPropertyCount = 0;
-        m_setValues.clear(); m_commands.clear();
+        m_setValues.clear(); m_commands.clear(); m_submissions.clear();
         m_lastCommand.clear(); m_commandCount = 0;
         m_lastObservedProperty.clear(); m_lastAsyncCommandStringList.clear(); m_asyncCommandCount = 0;
         m_lastReadProperty.clear(); m_readPropertyCount = 0;
@@ -91,6 +93,7 @@ public:
     QVariant m_lastSetValue;
     QVariantMap m_setValues;
     QList<QStringList> m_commands;
+    QList<QVariantList> m_submissions;
     int m_setPropertyCount = 0;
     QStringList m_lastCommand;
     int m_commandCount = 0;
