@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(mpvqml LANGUAGES CXX)
+project(mpvqml VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,6 +39,8 @@ qt_add_qml_module(mpvqml
         mpvrenderer.cpp
         mpvrenderer_p.h
 )
+
+set_target_properties(mpvqml PROPERTIES VERSION 0.2.0 SOVERSION 0.2)
 
 target_include_directories(mpvqml PUBLIC ${MPV_INCLUDE_DIRS})
 target_link_libraries(mpvqml PUBLIC
