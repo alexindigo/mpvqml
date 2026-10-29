@@ -433,6 +433,12 @@ Common fields in each playlist entry object:
 
 Additional fields from mpv are passed through automatically.
 
+Metadata, track labels, file names and error messages may contain untrusted
+media-file content, including HTML-like markup. Display these strings with
+`textFormat: Text.PlainText`; do not rely on `Text.AutoText`, which can interpret
+embedded image tags and fetch their URLs. The bundled examples use plain text
+for media-derived labels.
+
 ## Render loss and teardown
 
 The private renderer's snapshot supplier runs only during Qt synchronization;

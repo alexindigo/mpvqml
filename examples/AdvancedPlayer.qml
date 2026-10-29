@@ -108,11 +108,13 @@ Window {
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: {
+                    // Media tags and file names are display data, never markup.
                     var t = player.metadata.title
                     if (t) return t
                     var parts = player.source.toString().replace(/^file:\/\//, "").split("/")
                     return parts[parts.length - 1] || "Unknown File"
                 }
+                textFormat: Text.PlainText
                 color: "#a6adc8"
                 font.pointSize: 14
             }

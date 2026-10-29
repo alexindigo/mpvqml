@@ -106,6 +106,7 @@ Window {
                 spacing: 1
                 Text {
                     id: fileHeader
+                    textFormat: Text.PlainText
                     text: String(player.source).split("/").pop() + "  [-]"
                     color: "#000080"; font.pixelSize: 13; font.bold: true
                     MouseArea {
@@ -123,7 +124,7 @@ Window {
                     spacing: 1
                     Repeater {
                         model: fileMetaLines
-                        delegate: Text { text: modelData; color: "#000000"; font.pixelSize: 12 }
+                        delegate: Text { text: modelData; textFormat: Text.PlainText; color: "#000000"; font.pixelSize: 12 }
                     }
                 }
             }
@@ -138,6 +139,7 @@ Window {
 
                     Text {
                         id: trackHeader
+                        textFormat: Text.PlainText
                         text: (index + 1) + ". " + player.trackList[index].type + "  [-]"
                         color: "#000080"; font.pixelSize: 12; font.bold: true
                         MouseArea {
@@ -155,7 +157,7 @@ Window {
                         spacing: 1
                         Repeater {
                             model: thisTrack
-                            delegate: Text { text: modelData; color: "#000000"; font.pixelSize: 12 }
+                            delegate: Text { text: modelData; textFormat: Text.PlainText; color: "#000000"; font.pixelSize: 12 }
                         }
                     }
                 }

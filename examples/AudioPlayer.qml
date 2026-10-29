@@ -70,6 +70,7 @@ Window {
 
         Text {
             id: metaText
+            textFormat: Text.PlainText
             anchors.centerIn: parent
             color: "#000000"
             font.pixelSize: 12

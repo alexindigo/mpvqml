@@ -83,6 +83,7 @@ Window {
                 delegate: Row {
                     spacing: 4; width: trackView.width
                     Text {
+                        textFormat: Text.PlainText
                         text: trackId + ". " + type + " " + codec
                               + (lang ? " (" + lang + ")" : "")
                         color: "#000000"
@@ -191,6 +192,7 @@ Window {
 
             Text {
                 id: detailText
+                textFormat: Text.PlainText
                 readonly property string videoCodec: {
                     for (var t of player.trackList)
                         if (t.type === "video" && t.selected)

@@ -100,7 +100,7 @@ install(FILES LICENSES/LGPL-3.0-only.txt
 option(BUILD_TEST_MODE "Build the internal C++ test executables" ON)
 
 if(BUILD_TEST_MODE)
-  find_package(Qt6 REQUIRED COMPONENTS Test)
+  find_package(Qt6 REQUIRED COMPONENTS Test Network)
   enable_language(C)
 
   # Filesystem ownership for the QML suite stays in a test-only module.
@@ -137,7 +137,7 @@ if(BUILD_TEST_MODE)
     add_test(NAME mpvqml_${test_name}_tests COMMAND mpvqml_${test_name}_tests)
   endforeach()
   target_link_libraries(mpvqml_renderer_tests PRIVATE Qt6::Gui Qt6::Quick Qt6::OpenGL)
-  target_link_libraries(mpvqml_facade_tests PRIVATE Qt6::Gui Qt6::Quick)
+  target_link_libraries(mpvqml_facade_tests PRIVATE Qt6::Gui Qt6::Quick Qt6::Network)
   target_sources(mpvqml_facade_tests PRIVATE tests/mock_mpvcontroller.cpp tests/mock_mpvcontroller.h)
   target_compile_definitions(mpvqml_facade_tests PRIVATE MPVQML_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
   target_link_libraries(mpvqml_helpers_tests PRIVATE Qt6::Gui Qt6::Quick)

@@ -7,6 +7,10 @@
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QUrl>
+#include <QFile>
+#include <QTcpServer>
+#include <QTemporaryDir>
+#include <QQuickWindow>
 #include <limits>
 
 using namespace MpvQmlPrivate;
@@ -43,7 +47,7 @@ private slots:
 
     void migratedExamplesColdConstruct_data() {
         QTest::addColumn<QString>("file");
-        for (const char *name : {"AdvancedPlayer.qml", "AudioPlayer.qml", "AmbientScreensaver.qml"})
+        for (const char *name : {"AdvancedPlayer.qml", "AudioPlayer.qml", "AmbientScreensaver.qml", "MediaInspector.qml"})
             QTest::newRow(name) << QString::fromLatin1(name);
     }
 
@@ -55,6 +59,84 @@ private slots:
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
         std::unique_ptr<QObject> object(component.create());
         QVERIFY2(object, qPrintable(component.errorString()));
+    }
+
+    void mediaMetadataIsLiteralAndDoesNotFetchImages_data() {
+        QTest::addColumn<QString>("file");
+        for (const char *name : {"AdvancedPlayer.qml", "AudioPlayer.qml", "AmbientScreensaver.qml"})
+            QTest::newRow(name) << QString::fromLatin1(name);
+    }
+
+    void mediaMetadataIsLiteralAndDoesNotFetchImages() {
+        QFETCH(QString, file);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QTcpServer requests;
+        QVERIFY(requests.listen(QHostAddress::LocalHost));
+        const QString title = QStringLiteral("<img src='http://127.0.0.1:%1/pixel.png'><b>media-title</b>")
+                                  .arg(requests.serverPort());
+        QFile source(QStringLiteral(MPVQML_EXAMPLES_DIR) + "/../tests/assets/test_audio1.mp3");
+        QVERIFY(source.open(QIODevice::ReadOnly));
+        QByteArray audio = source.readAll();
+        // A tiny ID3v2.4 title fixture needs no media-encoding tool at test time.
+        auto synchsafe = [](int size) {
+            QByteArray bytes(4, '\0');
+            for (int i = 3; i >= 0; --i) { bytes[i] = char(size & 127); size >>= 7; }
+            return bytes;
+        };
+        if (audio.size() >= 10 && audio.startsWith("ID3")) {
+            int size = 0;
+            for (int i = 6; i < 10; ++i) size = (size << 7) | (uchar(audio[i]) & 127);
+            audio.remove(0, 10 + size);
+        }
+        const QByteArray value = QByteArray(1, '\0') + title.toLatin1();
+        const QByteArray frame = QByteArray("TIT2", 4) + synchsafe(value.size())
+                                 + QByteArray(2, '\0') + value;
+        const QByteArray tagged = QByteArray("ID3\4\0\0", 6) + synchsafe(frame.size()) + frame + audio;
+        QFile fixture(directory.filePath("tagged.mp3"));
+        QVERIFY(fixture.open(QIODevice::WriteOnly));
+        QCOMPARE(fixture.write(tagged), tagged.size());
+        fixture.close();
+
+        QQmlEngine engine;
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(MPVQML_EXAMPLES_DIR) + "/" + file));
+        QTRY_VERIFY_WITH_TIMEOUT(component.isReady() || component.isError(), 5000);
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        std::unique_ptr<QObject> object(component.create());
+        QVERIFY2(object, qPrintable(component.errorString()));
+        auto *window = qobject_cast<QQuickWindow *>(object.get());
+        QVERIFY(window);
+        auto *player = object->findChild<MpvPlayer *>();
+        QVERIFY(player);
+        // This metadata/UI test must not depend on a physical audio device.
+        QSignalSpy audioConfigured(player, &MpvPlayer::mpvPropertySetFinished);
+        const int audioRequest = player->setMpvPropertyAsync(QStringLiteral("ao"), QStringLiteral("null"));
+        QVERIFY(audioRequest > 0);
+        auto configured = [&]() {
+            for (const auto &reply : audioConfigured)
+                if (reply[0].toInt() == audioRequest) return reply[1].toInt() == 0;
+            return false;
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(configured(), 5000);
+        if (file == QStringLiteral("AmbientScreensaver.qml")) object->setProperty("hasMedia", true);
+        player->setPaused(true);
+        player->setSource(fixture.fileName());
+        QTRY_COMPARE_WITH_TIMEOUT(player->metadata().value("title").toString(), title, 5000);
+        auto labels = [&]() {
+            QList<QObject *> matches;
+            QList<QQuickItem *> items{window->contentItem()};
+            for (qsizetype i = 0; i < items.size(); ++i) {
+                auto *item = items[i];
+                items.append(item->childItems());
+                if (item->inherits("QQuickText") && item->property("text").toString().contains(title))
+                    matches.append(item);
+            }
+            return matches;
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(!labels().isEmpty(), 5000);
+        QTest::qWait(250); // let an AutoText image request reach the loopback trap
+        QVERIFY2(!requests.hasPendingConnections(), "media markup triggered an image fetch");
+        for (QObject *label : labels()) QCOMPARE(label->property("textFormat").toInt(), int(Qt::PlainText));
     }
 
     void idsAreSharedMonotonicAndTerminalRepliesAreExactlyOnce() {
