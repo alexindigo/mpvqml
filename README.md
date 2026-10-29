@@ -60,6 +60,18 @@ paths with loader overrides cleared, then restores directory permissions even
 on failure. Logs and a JSON receipt remain in the sibling `*-installed-*`
 directory. Install library/include directories must be prefix-relative.
 
+To exercise termination cleanup as well:
+
+```sh
+python3 -B tests/test-install-cleanup.py --build /path/to/build
+```
+
+This uses the real install/readelf/compile flow, pauses at a controlled consumer
+boundary with the build inaccessible, and sends SIGTERM and SIGHUP. It checks
+the signal exit statuses, restored build permissions and failure receipts; the
+harness also restores its previous signal handlers. Normal installed consumer
+reads are exercised by `run-install-convergence.sh` above.
+
 ## Usage
 
 See [API.md](API.md) for the complete QML API reference,

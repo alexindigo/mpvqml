@@ -11,7 +11,10 @@ import stat
 import subprocess
 import tempfile
 
+from termination_guard import unwind_on_termination
 
+
+@unwind_on_termination()
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build", required=True, type=Path)
@@ -82,8 +85,10 @@ def main():
         run(["c++", "-std=c++17", "-fPIC", source / "installed-consumer.cpp", "-o", header_consumer,
              "-I" + str(prefix / includedir), "-L" + str(prefix / libdir),
              "-Wl,-rpath," + str(prefix / libdir), "-lmpvqml", *flags], "header-consumer-build")
-        build.chmod(0)
+        # Arm restoration before changing permissions: a signal may arrive
+        # immediately after chmod, before the next Python statement executes.
         inaccessible = True
+        build.chmod(0)
         if os.access(build, os.R_OK | os.X_OK):
             raise RuntimeError("build remains accessible; run as an unprivileged user")
         module = run([module_consumer, prefix, build, libdir], "installed-module")
@@ -95,7 +100,7 @@ def main():
                        installed_plugin_backing_maps=True, allocated_async_read=True,
                        installed_public_header_read=True, clean_library_path_environment=True,
                        libraries=[str(path.relative_to(prefix)) for path in sorted((prefix / libdir).glob("libmpvqml.so*"))])
-    except Exception as error:
+    except BaseException as error:
         receipt.update(status="FAIL", error=str(error))
         raise
     finally:
