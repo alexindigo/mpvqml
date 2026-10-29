@@ -47,7 +47,9 @@ The event routing concern from the original investigation is solved — we
 no longer need MpvController internals access.
 
 However, the deeper questions from the original investigation remain
-unresolved and should inform any future production hardening:
+unresolved and should inform any future hook-policy design. The current
+callback/client lifetime and reentrant delivery mechanics have been hardened;
+the historical questions below do not imply that migration is still pending:
 
 ### Available hook points
 
@@ -72,22 +74,14 @@ mpv_hook_add(ctx, reply_userdata, "on_load", priority);
 mpv_hook_continue(ctx, hook_id);
 ```
 
-### Proposed QML API
+### QML API migration
 
-```qml
-Player {
-    id: player
-    Component.onCompleted: player.hookAdd("on_load", 0)
-
-    onHookTriggered: function(name, id) {
-        if (name === "on_load") {
-            var url = player.getProperty("stream-open-filename")
-            player.setProperty("stream-open-filename", url + "?token=abc")
-        }
-        player.hookContinue(id)
-    }
-}
-```
+The current hook methods/signals are listed below. Any property-dependent hook
+workflow uses `readMpvPropertyAsync` and `setMpvPropertyAsync`, correlates their
+allocated IDs, and continues the hook after the matching terminal completion
+(including failures). The original blocking-get/raw-set sketch is superseded
+by the owned async contract in API.md; no synchronous compatibility methods are
+provided. Missing continuation still blocks ordinary playback.
 
 ### C++ surface
 
@@ -115,13 +109,11 @@ signals:
 
 **Status: unsupported**
 
-MpvQt calls `mpv_initialize()` in `MpvAbstractItem` constructor with no
-gap for setting options. By the time `MpvPlayer` exists and QML can call
-`setOption()`, init has already run. For options that also exist as
-properties (like `keep-open-pause`, `volume-max`), `mpv_set_property_string`
-works at runtime. But truly pre-init-only options (`config-dir`,
-`load-scripts`, `player-operation-mode`) cannot be set through the current
-architecture.
+The owned backend retains a single blocking initialization attempt before QML
+construction-time bindings. There is no public pre-init option gap or inherited
+`setOption()` method. For runtime equivalents use `setMpvPropertyAsync`; truly
+pre-init-only options (`config-dir`, `load-scripts`, `player-operation-mode`)
+remain unsupported by the current constructor contract.
 
 ### Options that should be pre-init but are property-settable
 
@@ -142,21 +134,10 @@ These have no property equivalent and WILL fail if set after init:
 - `player-operation-mode`
 - `script`
 
-### Possible solutions
+### Future design boundary
 
-1. **Move init out of constructor.** Delay `MpvController::init()` until
-   the first frame render (via `updatePaintNode`). This would give QML
-   `Component.onCompleted` a chance to call `setOption()` before init.
-   Risk: may break MpvAbstractItem invariants, needs careful testing.
-
-2. **Pre-init options property.** Add a `QVariantMap m_preInitOptions`
-   member to `MpvPlayer` that accumulates options set before the first
-   render, then applies them before `mpv_initialize()`. Problem: init
-   happens in MpvAbstractItem constructor, before MpvPlayer exists.
-
-3. **Patch MpvQt.** Add a gap between `mpv_create()` and
-   `mpv_initialize()` in `MpvController::init()`, e.g. a virtual method
-   that derived classes can override to inject options. Requires
-   maintaining a fork of MpvQt.
+Supporting these options would require an explicitly approved construction/API
+design. The prior MpvQt inheritance/fork proposals are superseded by the owned
+backend. This topic is not part of the crash/lifetime remediation.
 
 *(Add new entries above this line)*

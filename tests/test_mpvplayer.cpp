@@ -9,6 +9,7 @@
 #include <QtQml/qqmlparserstatus.h>
 #include <QtQuick/QQuickWindow>
 #include <QtTest>
+#include <clocale>
 
 // Open up all protected and private channels for the
 // test engine
@@ -26,6 +27,9 @@ class TestMpvPlayer : public QObject {
   Q_OBJECT
 
 private slots:
+  void initTestCase() {
+    QVERIFY(std::setlocale(LC_NUMERIC, "C"));
+  }
   // Executed automatically before every individual test case
   void init() {
     m_window = new QQuickWindow();
@@ -197,9 +201,8 @@ private slots:
 
     m_player->m_rendererInitialized = false;
     m_player->load(QStringLiteral("file:///mock/track.mp4"));
-    for (auto &action : m_player->m_deferredInitActions)
-      action();
-    m_player->m_deferredInitActions.clear();
+    emit m_player->ready();
+    QVERIFY(m_player->m_deferredInitActions.isEmpty());
 
     m_player->m_rendererInitialized = true;
     m_player->load(QStringLiteral("file:///mock/track.mp4"));
@@ -233,9 +236,8 @@ private slots:
   void test_deferred_load_directory() {
     m_player->m_rendererInitialized = false;
     m_player->loadDirectory(QDir::currentPath());
-    for (auto &action : m_player->m_deferredInitActions)
-      action();
-    m_player->m_deferredInitActions.clear();
+    emit m_player->ready();
+    QVERIFY(m_player->m_deferredInitActions.isEmpty());
     // smoke test: no crash
     QVERIFY(true);
   }
@@ -245,9 +247,7 @@ private slots:
     m_player->load(QStringLiteral("/tmp/a.mp4"), QStringLiteral("replace"));
     m_player->load(QStringLiteral("/tmp/b.mp4"), QStringLiteral("append"));
     QCOMPARE(m_player->m_deferredInitActions.size(), 2);
-    for (auto &action : m_player->m_deferredInitActions)
-      action();
-    m_player->m_deferredInitActions.clear();
+    emit m_player->ready();
     QVERIFY(m_player->m_deferredInitActions.isEmpty());
   }
 
@@ -362,7 +362,7 @@ private slots:
     // Formerly called updatePaintNode(nullptr,nullptr) to trigger init;
     // that hook was replaced by MpvAbstractItem::ready() emission.
     m_player->releaseResources();
-    m_player->mpvController();
+    QVERIFY(m_player->coreAvailable());
 
     QEventLoop eventLoop;
     QTimer::singleShot(50, &eventLoop, &QEventLoop::quit);
@@ -527,24 +527,27 @@ private slots:
   }
 
   void test_set_property() {
-    m_player->setProperty(QStringLiteral("keep-open-pause"),
-                          QStringLiteral("yes"));
+    QVERIFY(m_player->setMpvPropertyAsync(QStringLiteral("keep-open-pause"),
+                                         QStringLiteral("yes")) > 0);
     QVERIFY(true);
   }
 
   void test_command_async() {
+    m_mockCtrl->m_autoComplete = false;
     int ret = m_player->commandAsync(
-        QStringList{QStringLiteral("loadfile"), QStringLiteral("/tmp/a.mp4")}, 42);
-    QCOMPARE(ret, 0);
+        QStringList{QStringLiteral("loadfile"), QStringLiteral("/tmp/a.mp4")});
+    QVERIFY(ret > 0);
     QCOMPARE(m_mockCtrl->m_lastAsyncCommandStringList,
              QStringList({QStringLiteral("loadfile"), QStringLiteral("/tmp/a.mp4")}));
-    QCOMPARE(m_mockCtrl->m_lastAsyncId, 42);
+    QCOMPARE(m_mockCtrl->m_lastAsyncId, ret);
 
     QSignalSpy spy(m_player, &MpvPlayer::asyncCommandFinished);
-    emit m_mockCtrl->asyncReply(42, 0);
-    QCOMPARE(spy.count(), 1);
-    QCOMPARE(spy.at(0).at(0).toInt(), 42);
+    emit m_mockCtrl->asyncCommandFinished(ret, 0, QStringLiteral("owned result"));
+    QCOMPARE(spy.count(), 0); // terminal delivery cannot run before call returns
+    QTRY_COMPARE(spy.count(), 1);
+    QCOMPARE(spy.at(0).at(0).toInt(), ret);
     QCOMPARE(spy.at(0).at(1).toInt(), 0);
+    QCOMPARE(spy.at(0).at(2).toString(), QStringLiteral("owned result"));
   }
 
   void test_error_occurred_signal_and_last_error() {
@@ -568,9 +571,8 @@ private slots:
     m_player->setRenderParameter(QStringLiteral("ambient-light"),
                                  QVariant(64));
     QCOMPARE(m_player->m_pendingRenderParams.size(), 1);
-    QCOMPARE(m_player->m_pendingRenderParams.at(0).first,
-             QStringLiteral("ambient-light"));
-    QCOMPARE(m_player->m_pendingRenderParams.at(0).second.toInt(), 64);
+    QVERIFY(m_player->m_pendingRenderParams.contains(QStringLiteral("ambient-light")));
+    QCOMPARE(m_player->m_pendingRenderParams.value(QStringLiteral("ambient-light")).toInt(), 64);
   }
 
   void test_hook_add_and_continue() {
@@ -590,7 +592,7 @@ private slots:
     QCOMPARE(spy.at(0).at(1).toULongLong(), static_cast<quint64>(1));
   }
 
-  void test_track_list_raw_data() {
+  void test_track_list_raw_values() {
     QVariantList tracks;
     QVariantMap track;
     track[QStringLiteral("id")] = 1;
@@ -607,17 +609,17 @@ private slots:
     QVariantList result = m_player->trackList();
     QCOMPARE(result.size(), 1);
     QVariantMap entry = result[0].toMap();
-    QCOMPARE(entry[QStringLiteral("id")].toInt(), 1);
+    QCOMPARE(entry[QStringLiteral("trackId")].toInt(), 1);
     QCOMPARE(entry[QStringLiteral("type")].toString(), QStringLiteral("video"));
     QCOMPARE(entry[QStringLiteral("codec")].toString(), QStringLiteral("hevc"));
-    QCOMPARE(entry[QStringLiteral("codec-desc")].toString(), QStringLiteral("H.265 / HEVC"));
+    QCOMPARE(entry[QStringLiteral("codecDesc")].toString(), QStringLiteral("H.265 / HEVC"));
     QCOMPARE(entry[QStringLiteral("selected")].toBool(), true);
   }
 
-  void test_playlist_raw_data() {
+  void test_playlist_raw_values() {
     QVariantList items;
     QVariantMap item;
-    item[QStringLiteral("id")] = 0;
+    item[QStringLiteral("id")] = 7;
     item[QStringLiteral("filename")] = QStringLiteral("/no/need/to/exist/video.mp4");
     item[QStringLiteral("current")] = true;
     item[QStringLiteral("playing")] = false;
@@ -630,7 +632,7 @@ private slots:
     QVariantList result = m_player->playlist();
     QCOMPARE(result.size(), 1);
     QVariantMap entry = result[0].toMap();
-    QCOMPARE(entry[QStringLiteral("id")].toInt(), 0);
+    QCOMPARE(entry[QStringLiteral("trackId")].toInt(), 7);
     QCOMPARE(entry[QStringLiteral("filename")].toString(), QStringLiteral("/no/need/to/exist/video.mp4"));
     QCOMPARE(entry[QStringLiteral("current")].toBool(), true);
     QCOMPARE(entry[QStringLiteral("playing")].toBool(), false);
@@ -982,18 +984,20 @@ private slots:
       double dval;
       int ival;
       char *sval = nullptr;
-      mpv_node nval;
+      mpv_node nval{};
 
       int err = mpv_get_property(mpv, name.constData(), MPV_FORMAT_DOUBLE, &dval);
       if (err == MPV_ERROR_PROPERTY_NOT_FOUND)
         err = mpv_get_property(mpv, name.constData(), MPV_FORMAT_FLAG, &ival);
       if (err == MPV_ERROR_PROPERTY_NOT_FOUND) {
         err = mpv_get_property(mpv, name.constData(), MPV_FORMAT_STRING, &sval);
-        mpv_free(sval);
+        if (err >= 0)
+          mpv_free(sval);
       }
       if (err == MPV_ERROR_PROPERTY_NOT_FOUND) {
         err = mpv_get_property(mpv, name.constData(), MPV_FORMAT_NODE, &nval);
-        mpv_free_node_contents(&nval);
+        if (err >= 0)
+          mpv_free_node_contents(&nval);
       }
 
       if (err == MPV_ERROR_PROPERTY_NOT_FOUND)
@@ -1110,13 +1114,10 @@ private slots:
 
   void test_setProperty_raw_routes_through_mock() {
     m_mockCtrl->reset();
-    m_player->setProperty(QStringLiteral("scale"), QStringLiteral("ewa_lanczos"));
-    QCOMPARE(m_mockCtrl->m_rawSetPropertyCount, 1);
-    QCOMPARE(m_mockCtrl->m_lastRawSetProperty, QStringLiteral("scale"));
-    QCOMPARE(m_mockCtrl->m_lastRawSetValue,
-             QStringLiteral("ewa_lanczos"));
-    // Must not have hit the typed setProperty path
-    QCOMPARE(m_mockCtrl->m_setPropertyCount, 0);
+    QVERIFY(m_player->setMpvPropertyAsync(QStringLiteral("scale"), QStringLiteral("ewa_lanczos")) > 0);
+    QCOMPARE(m_mockCtrl->m_setPropertyCount, 1);
+    QCOMPARE(m_mockCtrl->m_lastSetProperty, QStringLiteral("scale"));
+    QCOMPARE(m_mockCtrl->m_lastSetValue.toString(), QStringLiteral("ewa_lanczos"));
   }
 
   void test_hwdec_flows_via_syncProperties_not_eagerly() {

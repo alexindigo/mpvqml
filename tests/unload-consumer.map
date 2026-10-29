@@ -1,0 +1,4 @@
+{
+  global: mpvqml_test_start_blocked_retirement;
+  local: *;
+};

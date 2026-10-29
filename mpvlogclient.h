@@ -1,8 +1,7 @@
 #pragma once
-
 #include <QObject>
 #include <QString>
-#include <QAtomicInt>
+#include <memory>
 #include <mpv/client.h>
 
 class MpvLogClient : public QObject {
@@ -10,20 +9,18 @@ class MpvLogClient : public QObject {
 public:
     explicit MpvLogClient(QObject *parent = nullptr);
     ~MpvLogClient() override;
-
     void setupLogClient(mpv_handle *core);
-    void setLogLevel(const QString &level);
-
+    int setLogLevel(const QString &level);
+    void shutdown();
 signals:
-    void logMessage(const QString &facility, const QString &level,
-                    const QString &text);
-
+    void logMessage(const QString &facility, const QString &level, const QString &text);
 private:
-    void teardownLogClient();
-    void drainLogEvents();
-
+    struct WakeupToken;
+    static void onLogWakeup(void *context) noexcept;
+    void drainLogEvents(quint64 generation);
     mpv_handle *m_logClient = nullptr;
-    QAtomicInt m_logClientActive{false};
-
-    static void onLogWakeup(void *ctx);
+    std::unique_ptr<WakeupToken> m_wakeup;
+    quint64 m_generation = 1;
+    bool m_draining = false;
+    bool m_redrain = false;
 };

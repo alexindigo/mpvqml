@@ -109,6 +109,22 @@ MpvPlayer {
 | `lastError` | var | Most recent error: `{ code: int, message: string }`. Read-only. |
 | `demuxerCacheState` | var | Demuxer cache statistics. Read-only. |
 
+### Backend lifecycle
+
+| Property | Type | Description |
+|---|---|---|
+| `coreAvailable` | bool | Native initialization succeeded and the player accepts operations. |
+| `initializationError` / `initializationErrorString` | int / string | Immutable result of the single core-initialization attempt. |
+| `rendererReady` | bool | The current renderer has a native context and valid FBO. False before rendering and during context loss. |
+| `renderError` / `renderErrorString` | int / string | Current render-attempt failure, including unsupported Qt graphics backends. |
+
+`ready()` marks successful renderer readiness, including successful recreation;
+core availability alone does not imply visible video. Core/render failures emit
+`initializationFailed(code, message)` / `renderingFailed(code, message)` and
+update `lastError`. Applications can retain a solid background and independent
+controls. Core admission can fail recoverably when all 32 retirement leases are
+occupied by live or still-retiring cores.
+
 ---
 
 ## Methods
@@ -267,22 +283,41 @@ player.setLogLevel("no")     // disable logging
 ### Advanced
 
 ```qml
-player.setProperty("keep-open-pause", "yes")
+player.setMpvPropertyAsync("keep-open-pause", true)
 player.loadConfigFile("/path/to/mpv.conf")
-var id = player.commandAsync(["loadfile", "video.mp4", "append"], 42)
-player.setRenderParameter("target-peak", 203)
+var id = player.commandAsync(["loadfile", "video.mp4", "append"])
+var readId = player.readMpvPropertyAsync("mpv-version")
+player.setRenderParameter("ambient-light", 64)
 player.hookAdd("on_load", 0)
 player.hookContinue(hookId)
 ```
 
 | Method | Description |
 |---|---|
-| `setProperty(name, value)` | Set an arbitrary mpv property by name (raw pass-through to `mpv_set_property_string`). Bypasses typed setters' dirty/pending pipeline; intended as an escape hatch for properties without a dedicated QML setter. |
-| `loadConfigFile(path)` | Load an mpv configuration file. |
-| `commandAsync(params, id)` | Run an mpv command asynchronously. Results arrive via `asyncCommandFinished`. |
-| `setRenderParameter(name, value)` | Set a render context parameter (e.g. `"target-peak"`, `"ambient-light"`). |
+| `setMpvPropertyAsync(name, value)` | Queue a generic property write through the controller interface; completes with `mpvPropertySetFinished(id, error)`. |
+| `readMpvPropertyAsync(name)` | Queue a generic read; completes with `mpvPropertyReadFinished(id, error, value)`. |
+| `loadConfigFile(path)` | Queue configuration loading on the worker; failures use the ordinary operation/error signals. Pre-init-only options remain unsupported. |
+| `commandAsync(params)` | Allocate a request ID and queue a native command; completes with `asyncCommandFinished(id, error, result)`. |
+| `setRenderParameter(name, value)` | Coalesce the supported `"ambient-light"` nonnegative integer parameter and apply it on the rendering thread. Unsupported names/types report errors. |
 | `hookAdd(name, priority)` | Register a hook handler. Lower priority runs first. |
-| `hookContinue(id)` | Resume playback after handling a hook. Must be called or mpv stays blocked. |
+| `hookContinue(id)` | Resume playback with the uint64/quint64 ID delivered by `hookTriggered`, not an async request ID. Must be called or mpv stays blocked. |
+| `shutdown()` | Stop admissions/sampling interest, detach helpers, cancel deferred loads and settle admitted operations while the receiver exists. Native resources retire asynchronously. Idempotent. |
+
+Async returns are **positive allocated int IDs**, shared monotonically across
+commands and property reads/writes for this player. They are never wrapped or
+reused. A positive ID means local admission, not native acceptance or completion.
+Every admitted operation gets exactly one matching terminal signal after the
+call returns, including later worker/native rejection. A negative return is an
+immediate rejection and gets no terminal signal; zero is never a request ID.
+Results contain owned Qt values, not borrowed libmpv event storage. Native
+64-bit correlation tokens are private. Caller-supplied IDs and inherited
+blocking read/command methods are removed; there is no raw `setProperty` API.
+
+Typed setters and convenience actions use the same queued interface. Their
+errors use `operationFailed(operation, code, message)` / `errorOccurred`, and
+their completions are not reported as caller `asyncCommandFinished` requests.
+Screenshot convenience submission is asynchronous; shutdown does not promise
+to cancel an already-running file write.
 
 ---
 
@@ -318,7 +353,7 @@ onLogMessage: function(facility, level, text) {
 | `logMessage(facility, level, text)` | `facility`: string, `level`: string, `text`: string | A log message from mpv. Enable with `setLogLevel()`. |
 
 ```qml
-onAsyncCommandFinished: function(id, error) {
+onAsyncCommandFinished: function(id, error, result) {
     console.log("async command", id, "completed with error", error)
 }
 onHookTriggered: function(name, id) {
@@ -329,8 +364,10 @@ onHookTriggered: function(name, id) {
 
 | Signal | Arguments | Description |
 |---|---|---|
-| `asyncCommandFinished(id, error)` | `id`: int, `error`: int | An async command completed. `error` is 0 on success, negative on failure. |
-| `hookTriggered(name, id)` | `name`: string, `id`: int | A hook point was reached. Call `hookContinue(id)` to resume. |
+| `asyncCommandFinished(id, error, result)` | `id`: int, `error`: int, `result`: var | A caller command's terminal completion; error is 0 on success, negative on failure. |
+| `mpvPropertySetFinished(id, error)` | `id`: int, `error`: int | A caller property write completed. |
+| `mpvPropertyReadFinished(id, error, value)` | `id`: int, `error`: int, `value`: var | A caller read completed with an owned value, or an invalid value on failure. |
+| `hookTriggered(name, id)` | `name`: string, `id`: uint64/quint64 | A hook point was reached. Pass this same hook ID to `hookContinue(id)` to resume; it is not a command/read/write request ID. |
 
 Each writable property also has a matching `Changed` signal:
 `onSourceChanged`, `onPausedChanged`, `onVolumeChanged`, etc.
@@ -367,15 +404,15 @@ See `mpvError` values: `Success`, `EventQueueFull`, `NoMem`,
 
 ## Track and playlist data
 
-`trackList` and `playlist` return the raw mpv data as a list of objects.
-Hyphenated keys from mpv (e.g. `codec-desc`) are automatically converted to
-camelCase (`codecDesc`).
+`trackList` and `playlist` return mpv data as a list of objects with converted
+keys. In both lists, mpv's `id` is exposed as `trackId`. Hyphenated keys from
+mpv (e.g. `codec-desc`) are automatically converted to camelCase (`codecDesc`).
 
 Common fields in each track object:
 
 | Property | Type | Description |
 |---|---|---|
-| `id` | int | Track ID number. |
+| `trackId` | int | Track ID number (mpv's `id`). |
 | `type` | string | `"audio"`, `"video"`, or `"sub"`. |
 | `title` | string | Human-readable track title. |
 | `lang` | string | Language code (e.g. `"eng"`, `"fra"`). |
@@ -389,14 +426,63 @@ Common fields in each playlist entry object:
 
 | Property | Type | Description |
 |---|---|---|
-| `id` | int | Playlist entry ID. |
+| `trackId` | int | Playlist entry ID (mpv's `id`). |
 | `filename` | string | URL or file path of the entry. |
 | `current` | bool | True if this is the currently playing entry. |
 | `playing` | bool | True if this entry is currently being played. |
 
 Additional fields from mpv are passed through automatically.
 
+## Render loss and teardown
+
+The private renderer's snapshot supplier runs only during Qt synchronization;
+native redraw callbacks never access a player item. Readiness/status delivery is
+generation-tagged. A newer successful context can recover the same retained
+playlist entry after matching VO-loss termination, preserving playlist identity,
+position and pause. Stop/source/navigation changes cancel recovery interest;
+there is no unconditional media reload.
+
+`stop(false)` also cancels pre-render deferred media loads. Player/window
+destruction does not join final-core file I/O: reserved native retirement workers
+retain live handles until destruction actually completes. Native render cleanup
+still uses the original GL thread, and this does not bound arbitrary graphics
+driver stalls or delete accepted screenshot files.
+
 ---
+
+## C++ API/ABI and caller migration
+
+The current `MpvPlayer` directly derives from `QQuickFramebufferObject`, with a
+private Qt/libmpv backend. Rebuild C++ consumers against the current headers and
+library together: the former MpvQt base/casts and adapter constructor are not
+ABI-compatible. Installed public headers are `mpvqml/mpvplayer.h` and
+`mpvqml/mpvcontroller_iface.h`; the production adapter/controller/renderer are
+private. Consumers do not include or link MpvQt.
+
+The coordinated caller signatures are:
+
+```cpp
+Q_INVOKABLE int commandAsync(const QStringList &params);
+Q_INVOKABLE int setMpvPropertyAsync(const QString &name, const QVariant &value);
+Q_INVOKABLE int readMpvPropertyAsync(const QString &name);
+void asyncCommandFinished(int id, int error, const QVariant &result);
+void mpvPropertySetFinished(int id, int error);
+void mpvPropertyReadFinished(int id, int error, const QVariant &value);
+Q_INVOKABLE void hookContinue(quint64 id);
+void hookTriggered(const QString &name, quint64 id);
+```
+
+| # | Earlier caller pattern | Current contract |
+|---|---|---|
+| 1 | Supply a command correlation ID or interpret return as native status | Store the returned positive int request ID and wait for its matching queued completion; negative return is immediate rejection. |
+| 2 | Blocking generic property reads or raw `setProperty(name, value)` | Use `readMpvPropertyAsync` / `setMpvPropertyAsync` and their distinct completion signals. Typed media setters remain available. |
+| 3 | Borrow `mpv_event` or native reply storage | Consume the terminal signal's owned Qt value; native correlation tokens stay private. |
+| 4 | Treat a hook ID as an allocated async request ID | Keep the supplied uint64/quint64 hook ID separate and return it unchanged to `hookContinue`. Property-dependent hook work waits for its own read/write completion before continuation. |
+
+Migrate examples and other callers together with the rebuilt
+module. The existing `import MpvQml`, typed media API and helper functionality
+remain. These source/ABI changes do not choose a release version or rewrite
+historical CHANGELOG entries.
 
 ## Basic examples
 

@@ -18,7 +18,7 @@ Window {
         visible: source !== ""
         fillMode: "preserveAspectFit"
         Component.onCompleted: {
-            setProperty("keep-open", "always")
+            setMpvPropertyAsync("keep-open", "always")
         }
     }
 

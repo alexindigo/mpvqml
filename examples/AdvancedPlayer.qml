@@ -24,7 +24,7 @@ Window {
         anchors.fill: parent
         fillMode: "preserveAspectCrop"
 
-        Component.onCompleted: setProperty("keep-open", "always")
+        Component.onCompleted: setMpvPropertyAsync("keep-open", "always")
         onFileStarted: { playlistFinished = false; hadVideo = false }
         onFileLoaded: isAudioOnly = !player.hasVideo
         onHasVideoChanged: {

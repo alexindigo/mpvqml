@@ -17,7 +17,7 @@ Window {
 
     function loadDir(path) {
         hasMedia = true
-        player.setProperty("image-display-duration", "6")
+        player.setMpvPropertyAsync("image-display-duration", 6)
         player.loopPlaylist = "inf"
         player.loadDirectory(path, mediaFilters, "replace", "name")
     }
