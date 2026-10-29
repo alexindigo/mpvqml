@@ -1,6 +1,7 @@
 #include "mpvplayer.h"
 #include "mpvrenderbridge_p.h"
 #include "mpvrenderer_p.h"
+#include "test_window.h"
 
 #include <QColor>
 #include <QGuiApplication>
@@ -20,6 +21,7 @@
 #include <vector>
 
 using namespace MpvQmlPrivate;
+using MpvQmlTestSupport::TestWindow;
 
 namespace {
 
@@ -53,7 +55,7 @@ class LutGuardFixture : public QObject {
   Q_OBJECT
 private slots:
   void paddingPoisonedVideoRenders() {
-    QQuickWindow window;
+    TestWindow window;
     window.setColor(Qt::black);
     window.resize(160, 120);
     window.setPersistentSceneGraph(false);

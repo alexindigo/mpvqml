@@ -10,9 +10,11 @@ TestCase {
     height: 480
 
     TemporaryDirectory { id: fixtureDirectory }
+    WindowPolicy { id: testWindowPolicy }
 
     function initTestCase() {
         verify(fixtureDirectory.valid)
+        verify(testWindowPolicy.inputTransparent())
     }
 
     component PlayerFixture: Item {

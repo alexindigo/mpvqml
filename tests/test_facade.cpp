@@ -1,6 +1,7 @@
 #include "mpvplayer.h"
 #include "mpvcontroller_p.h"
 #include "mock_mpvcontroller.h"
+#include "test_window.h"
 #include <QPointer>
 #include <QSignalSpy>
 #include <QtTest>
@@ -57,8 +58,11 @@ private slots:
         QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(MPVQML_EXAMPLES_DIR) + "/" + file));
         QTRY_VERIFY_WITH_TIMEOUT(component.isReady() || component.isError(), 5000);
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
-        std::unique_ptr<QObject> object(component.create());
+        auto object = MpvQmlTestSupport::createTestWindow(component);
         QVERIFY2(object, qPrintable(component.errorString()));
+        auto *window = qobject_cast<QQuickWindow *>(object.get());
+        QVERIFY(window);
+        QVERIFY(window->flags().testFlag(Qt::WindowTransparentForInput));
     }
 
     void mediaMetadataIsLiteralAndDoesNotFetchImages_data() {
@@ -102,10 +106,11 @@ private slots:
         QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(MPVQML_EXAMPLES_DIR) + "/" + file));
         QTRY_VERIFY_WITH_TIMEOUT(component.isReady() || component.isError(), 5000);
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
-        std::unique_ptr<QObject> object(component.create());
+        auto object = MpvQmlTestSupport::createTestWindow(component);
         QVERIFY2(object, qPrintable(component.errorString()));
         auto *window = qobject_cast<QQuickWindow *>(object.get());
         QVERIFY(window);
+        QVERIFY(window->flags().testFlag(Qt::WindowTransparentForInput));
         auto *player = object->findChild<MpvPlayer *>();
         QVERIFY(player);
         // This metadata/UI test must not depend on a physical audio device.

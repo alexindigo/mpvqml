@@ -110,10 +110,10 @@ if(BUILD_TEST_MODE)
       URI MpvQml.TestSupport
       VERSION 1.0
       OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/MpvQml/TestSupport
-      SOURCES tests/temporary_directory.h
+      SOURCES tests/temporary_directory.h tests/test_window.h
   )
   target_include_directories(mpvqml_test_support PRIVATE tests)
-  target_link_libraries(mpvqml_test_support PRIVATE Qt6::Core Qt6::Qml)
+  target_link_libraries(mpvqml_test_support PRIVATE Qt6::Core Qt6::Qml Qt6::Quick)
 
   add_executable(mpvqml_cpp_tests
         tests/test_mpvplayer.cpp

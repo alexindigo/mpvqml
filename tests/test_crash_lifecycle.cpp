@@ -1,6 +1,7 @@
 #include "faults.h"
 #include "mpvcontroller_p.h"
 #include "mpvplayer.h"
+#include "test_window.h"
 
 #include <QCoreApplication>
 #include <QGuiApplication>
@@ -25,6 +26,7 @@
 #include <unistd.h>
 
 using namespace MpvQmlPrivate;
+using MpvQmlTestSupport::TestWindow;
 
 namespace {
 QString fixtureName;
@@ -284,7 +286,7 @@ private slots:
   }
 
   void publicRenderFailure() {
-    QQuickWindow window;
+    TestWindow window;
     window.setColor(QColor("#345678"));
     window.resize(160, 120);
     window.setPersistentSceneGraph(false);
@@ -357,7 +359,7 @@ private slots:
     // A deliberate unsupported-API fault, not an alternative video/soak lane.
     // Keep the normal runner on OpenGL; this child alone selects Qt software.
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
-    QQuickWindow window;
+    TestWindow window;
     window.setColor(QColor("#345678"));
     window.resize(160, 120);
     window.setPersistentSceneGraph(false);
@@ -385,7 +387,7 @@ private slots:
 
 private:
   void renderFailureRecovery(bool replaceSource) {
-    QQuickWindow window;
+    TestWindow window;
     window.resize(160, 120);
     window.setPersistentSceneGraph(false);
     window.setPersistentGraphics(false);
@@ -469,7 +471,7 @@ private:
     const QByteArray nativePath = path.toUtf8();
     if (fifo) QCOMPARE(::mkfifo(nativePath.constData(), 0600), 0);
     QCOMPARE(faults.watchFile(nativePath.constData()), 0);
-    auto window = std::make_unique<QQuickWindow>();
+    auto window = std::make_unique<TestWindow>();
     window->setColor(Qt::black);
     window->resize(160, 120);
     window->setPersistentSceneGraph(false);

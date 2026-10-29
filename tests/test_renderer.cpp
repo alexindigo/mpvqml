@@ -1,6 +1,7 @@
 #include "mpvcontroller_p.h"
 #include "mpvrenderer_p.h"
 #include "mpvplayer.h"
+#include "test_window.h"
 
 #include <QColor>
 #include <QImage>
@@ -9,6 +10,7 @@
 #include <utility>
 
 using namespace MpvQmlPrivate;
+using MpvQmlTestSupport::TestWindow;
 
 // Standalone native consumer of the private renderer, not a mock readiness or
 // a second product renderer. Its GUI-owned inputs are copied only in synchronize.
@@ -117,7 +119,7 @@ class TestRenderer : public QObject {
   Q_OBJECT
 private slots:
   void survivorPixelsContinueAcrossPeerDeletion() {
-    QQuickWindow survivor;
+    TestWindow survivor;
     survivor.resize(160, 120);
     survivor.setPersistentSceneGraph(false);
     survivor.setPersistentGraphics(false);
@@ -140,7 +142,7 @@ private slots:
     QVERIFY(QTest::qWaitForWindowExposed(&survivor));
     QTRY_VERIFY_WITH_TIMEOUT(player->rendererReady() && blue(&survivor), 5000);
     for (int i = 0; i < 10; ++i) {
-      auto peer = std::make_unique<QQuickWindow>();
+      auto peer = std::make_unique<TestWindow>();
       peer->resize(160, 120);
       peer->setPersistentSceneGraph(false);
       peer->setPersistentGraphics(false);
@@ -160,7 +162,7 @@ private slots:
   }
 
   void publicFacadeRendersAndAutomaticallyRecoversVideo() {
-    QQuickWindow window;
+    TestWindow window;
     window.setColor(Qt::black);
     window.resize(160, 120);
     window.setPersistentSceneGraph(false);
@@ -206,7 +208,7 @@ private slots:
   }
 
   void actualVideoPixelsAndContextRecreation() {
-    QQuickWindow window;
+    TestWindow window;
     window.setColor(Qt::black);
     window.setWidth(160);
     window.setHeight(120);
@@ -290,7 +292,7 @@ private slots:
 
   void newerPauseAndSeekSupersedeSavedState() {
     QFETCH(bool, newSeek);
-    QQuickWindow window;
+    TestWindow window;
     window.resize(160, 120);
     window.setPersistentSceneGraph(false);
     window.setPersistentGraphics(false);
@@ -335,7 +337,7 @@ private slots:
 
   void recoveryDoesNotOverrideNewIntent() {
     QFETCH(bool, sourceChange);
-    QQuickWindow window;
+    TestWindow window;
     window.setColor(Qt::black);
     window.resize(160, 120);
     window.setPersistentSceneGraph(false);

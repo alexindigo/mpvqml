@@ -23,6 +23,7 @@
 #undef protected
 
 #include "mock_mpvcontroller.h"
+#include "test_window.h"
 
 class TestMpvPlayer : public QObject {
   Q_OBJECT
@@ -33,7 +34,7 @@ private slots:
   }
   // Executed automatically before every individual test case
   void init() {
-    m_window = new QQuickWindow();
+    m_window = new MpvQmlTestSupport::TestWindow();
     m_mockCtrl = new MockMpvController(this);
     m_player = new MpvPlayer(nullptr, m_mockCtrl);
     m_player->setParentItem(m_window->contentItem());
