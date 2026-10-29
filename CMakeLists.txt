@@ -60,7 +60,18 @@ install(TARGETS mpvqml
     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
-install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/MpvQml/
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # The module plugin and backing library share the chosen prefix. Only the
+    # installed plugin needs this relative path; build-tree search stays local.
+    set_target_properties(mpvqmlplugin PROPERTIES INSTALL_RPATH "$ORIGIN/../../..")
+endif()
+install(TARGETS mpvqmlplugin
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/qt6/qml/MpvQml
+    RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}/qt6/qml/MpvQml
+)
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/MpvQml/qmldir
+    ${CMAKE_CURRENT_BINARY_DIR}/MpvQml/mpvqml.qmltypes
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/qt6/qml/MpvQml
 )
 

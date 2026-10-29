@@ -43,6 +43,23 @@ A debug build with test coverage is also available:
 scripts/build-test
 ```
 
+### Installed-module regression (Linux)
+
+After building, run from a graphical session as an unprivileged user:
+
+```sh
+bash tests/run-install-convergence.sh --build /path/to/build
+```
+
+The test requires Python 3, `readelf`, a C++ compiler, pkg-config and Qt Test
+development files. It stages a fresh DESTDIR under the build directory, moves
+the installation to a sibling temporary prefix, and makes the entire build
+directory inaccessible while QML and public-header consumers complete real
+async reads. It checks the plugin's prefix-relative RUNPATH and loaded library
+paths with loader overrides cleared, then restores directory permissions even
+on failure. Logs and a JSON receipt remain in the sibling `*-installed-*`
+directory. Install library/include directories must be prefix-relative.
+
 ## Usage
 
 See [API.md](API.md) for the complete QML API reference,
