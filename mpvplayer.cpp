@@ -462,7 +462,10 @@ void MpvPlayer::observeOwnedProperty(const QString &name, const QVariant &value)
 void MpvPlayer::setOwnedProperty(const QString &name, const QVariant &value) {
     auto &state = m_private->properties[name];
     const QVariant desired = state.normalize(value);
-    if (state.current() == desired) return;
+    // These empty values are write intent, not a claim about the cached
+    // observation. An earlier raw write may not have been observed yet.
+    const bool clear = (name == "screenshot-directory" || name == "glsl-shaders") && desired.toString().isEmpty();
+    if (clear ? state.desired == desired : state.current() == desired) return;
     const auto revision = ++state.revision;
     state.desired = desired;
     state.queued = coreAvailable();

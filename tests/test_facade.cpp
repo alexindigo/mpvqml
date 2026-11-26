@@ -556,6 +556,22 @@ private slots:
         QVERIFY(mock.m_setValues.value("screenshot-directory").toString().isEmpty());
     }
 
+    void clearsOverrideRawWritesBeforeObservation() {
+        MockMpvController mock;
+        MpvPlayer player(nullptr, &mock);
+        emit player.ready();
+        mock.reset();
+        QVERIFY(player.screenshotDirectory().isEmpty());
+        QVERIFY(player.userShaders().isEmpty());
+        QVERIFY(player.setMpvPropertyAsync("screenshot-dir", "/configured") > 0);
+        QVERIFY(player.setMpvPropertyAsync("glsl-shaders", QVariantList{"custom.glsl"}) > 0);
+        player.setScreenshotDirectory({});
+        player.setUserShaders({});
+        QVERIFY(mock.m_setValues.contains("screenshot-directory"));
+        QVERIFY(mock.m_setValues.value("screenshot-directory").toString().isEmpty());
+        QCOMPARE(mock.m_setValues.value("glsl-shaders"), QVariant(QVariantList()));
+    }
+
     void initialFailureIsVisibleAndOperationsDoNotCreatePendingWork() {
         MockMpvController mock;
         mock.m_initialization = {true, false, MPV_ERROR_GENERIC, QStringLiteral("fixture failure")};
