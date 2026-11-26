@@ -48,9 +48,13 @@ state removes its old canonical-key entry and appends the replacement after any
 intervening commands (one mouse position and one selection per track type, with
 sub/subtitle sharing sid); command actions
 such as loads and directory loads retain every occurrence in order. State and
-commands share one queue and its cancellation lifetime. Actions are detached
-before iteration, rechecked after external delivery, and
-cancelled by stop/source/navigation/shutdown interest changes.
+commands share a queue. Directory enumeration returns an owned result off the
+GUI thread. Its ticket gates delivery and ordered bounded batches block the
+following renderer-gated actions until that directory settles. Known raw and
+typed stops and navigation share effect classification with worker recovery;
+clear cancels only pending loads while preserving any playing entry. Unknown
+raw commands, aliases and script effects remain an escape hatch. Video selection
+uses native `vid`; it has no reload or facade seek continuation.
 
 ## Async operations and event ownership
 
@@ -86,8 +90,10 @@ disconnects its receivers and retired generations cannot change current status.
 
 Context retirement records a coherent generation/intent marker before native
 free. A matching VO-loss termination plus newer-context readiness and unchanged
-source interest permits one same-entry playlist replay. Pause completion precedes
-replay admission; position restoration follows the matching file-loaded event.
+source interest permits one same-entry playlist replay. GUI source replacement
+advances the shared recovery epoch even before renderer admission; native starts
+are tagged with the worker's admitted epoch. Pause completion precedes replay
+admission; position restoration follows the matching file-loaded event.
 Owned observations and newer pause/seek intent supersede saved state. Stop,
 source/navigation changes and shutdown cancel recovery; late replies cannot
 revive it. Other errors never cause unconditional reloads.

@@ -138,6 +138,7 @@ private:
   RecoveryState m_recovery;
   QHash<quint64, RecoveryRequest> m_recoveryRequests;
   quint64 m_recoveryRevision = 0;
+  quint64 m_admittedMediaEpoch = 0;
   quint64 m_pauseRevision = 0;
   quint64 m_seekRevision = 0;
   bool m_observedPause = false;

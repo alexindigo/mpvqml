@@ -3,13 +3,18 @@
 #include "mpvrenderer_p.h"
 #include "mpvlogclient.h"
 #include "mpvhookmanager.h"
+#include "mpvmediaeffect_p.h"
 #include <QDir>
 #include <QFileInfo>
+#include <QFutureWatcher>
 #include <QGuiApplication>
 #include <QPointer>
+#include <QPromise>
 #include <QQuickWindow>
 #include <QRunnable>
 #include <QSGRendererInterface>
+#include <QThreadPool>
+#include <QTimer>
 #include <QUrl>
 #include <QtGui/qguiapplication_platform.h>
 #include <cmath>
@@ -42,6 +47,11 @@ CHECK_ERROR(NotImplemented, MPV_ERROR_NOT_IMPLEMENTED);
 CHECK_ERROR(Generic, MPV_ERROR_GENERIC);
 #undef CHECK_ERROR
 
+struct DirectoryScan {
+    enum Status { MissingDirectory, NoMatches, Found } status;
+    QStringList files;
+};
+
 struct MpvPlayer::Private {
     MpvControllerAdapter *controller = nullptr;
     std::shared_ptr<MpvRenderBridge> bridge = std::make_shared<MpvRenderBridge>();
@@ -52,6 +62,13 @@ struct MpvPlayer::Private {
     QPointer<QQuickWindow> renderWindow;
     quint64 failedGeneration = 0;
     bool failureReported = false;
+    bool drainingMedia = false;
+    quint64 directoryTicket = 0;
+    bool directoryActive = false;
+    QPointer<QFutureWatcher<DirectoryScan>> directoryWatcher;
+    QStringList directoryFiles;
+    qsizetype directoryIndex = 0;
+    QString directoryFirstMode;
 };
 
 static bool nearlyEqual(double a, double b) {
@@ -119,12 +136,7 @@ MpvPlayer::MpvPlayer(QQuickItem *parent, MpvControllerIface *ctrl)
         if (!m_shuttingDown) emit fileStarted();
     });
     connect(m_ctrl, &MpvControllerIface::fileLoaded, this, [this]() {
-        if (m_shuttingDown) return;
-        const quint64 intent = m_mediaRevision;
-        const double seek = std::exchange(m_pendingTrackSeek, -1.0);
-        QPointer<MpvPlayer> alive(this);
-        emit fileLoaded();
-        if (alive && !m_shuttingDown && intent == m_mediaRevision && seek >= 0) seekAbsolute(seek);
+        if (!m_shuttingDown) emit fileLoaded();
     });
     connect(m_ctrl, &MpvControllerIface::endFile, this, [this](const QString &reason) {
         if (m_shuttingDown) return;
@@ -365,8 +377,9 @@ void MpvPlayer::flushProperty(const QString &name, quint64 revision) {
 void MpvPlayer::setSource(const QString &val) {
     if (m_source == val) return;
     m_source = val;
-    const quint64 revision = ++m_mediaRevision;
-    m_deferredInitActions.clear();
+    supersedeMedia();
+    const quint64 revision = m_mediaRevision;
+    if (auto core = m_private->bridge->core) core->advanceSourceIntent();
     QPointer<MpvPlayer> alive(this);
     emit sourceChanged();
     if (alive && revision == m_mediaRevision && !m_shuttingDown) load(val);
@@ -436,11 +449,10 @@ void MpvPlayer::syncProperties() {
         submitProperty(name, value);
         if (!alive || m_shuttingDown || !coreAvailable()) return;
     }
-    const auto actions = std::exchange(m_deferredInitActions, {});
-    for (const auto &action : actions) {
-        action.retry();
-        if (!alive || m_shuttingDown || !coreAvailable()) return;
-    }
+    if (m_private->directoryActive && !m_private->directoryWatcher)
+        dispatchDirectory(m_private->directoryTicket);
+    else
+        drainMedia();
 }
 
 void MpvPlayer::submitProperty(const QString &name, const QVariant &value) {
@@ -448,18 +460,28 @@ void MpvPlayer::submitProperty(const QString &name, const QVariant &value) {
     if (id < 0) failOperation(name, id);
     else m_requests.insert(id, {1, false, name});
 }
-void MpvPlayer::submitCommand(const QStringList &params) {
+void MpvPlayer::submitCommand(const QStringList &params, bool orderedLoad) {
     const QString operation = params.isEmpty() ? QStringLiteral("command") : params[0];
+    const auto effect = orderedLoad ? MediaEffect::None : commandMediaEffect(params);
+    if (effect == MediaEffect::Replace || effect == MediaEffect::ClearPendingLoads)
+        supersedeMedia(effect == MediaEffect::ClearPendingLoads);
+    QPointer<MpvPlayer> alive(this);
     const int id = coreAvailable() && m_ctrl ? m_ctrl->commandAsync(params) : MPV_ERROR_UNINITIALIZED;
     if (id < 0) failOperation(operation, id);
     else m_requests.insert(id, {0, false, operation});
+    if (alive && effect == MediaEffect::ClearPendingLoads) drainMedia();
 }
 int MpvPlayer::commandAsync(const QStringList &params) {
+    const auto effect = commandMediaEffect(params);
+    if (effect == MediaEffect::Replace || effect == MediaEffect::ClearPendingLoads)
+        supersedeMedia(effect == MediaEffect::ClearPendingLoads);
     const int id = coreAvailable() && m_ctrl ? m_ctrl->commandAsync(params) : MPV_ERROR_UNINITIALIZED;
     if (id > 0) m_requests.insert(id, {0, true, QStringLiteral("commandAsync")});
+    if (effect == MediaEffect::ClearPendingLoads) drainMedia();
     return id;
 }
 int MpvPlayer::setMpvPropertyAsync(const QString &name, const QVariant &value) {
+    if (propertyMediaEffect(name) == MediaEffect::Replace) supersedeMedia();
     const int id = coreAvailable() && m_ctrl ? m_ctrl->setMpvPropertyAsync(name, value) : MPV_ERROR_UNINITIALIZED;
     if (id > 0) m_requests.insert(id, {1, true, name});
     return id;
@@ -484,41 +506,60 @@ void MpvPlayer::complete(int id, int error, const QVariant &value, int kind) {
     if (alive && error < 0) failOperation(owner.operation, error);
 }
 
-bool MpvPlayer::deferUntilRendererReady(const QString &operation, const QString &stateKey, std::function<void()> retry) {
-    if (!coreAvailable()) { failOperation(operation, MPV_ERROR_UNINITIALIZED); return true; }
-    if (!m_rendererInitialized || m_renderError < 0) {
-        const quint64 revision = m_mediaRevision;
-        auto guardedRetry = [this, revision, retry = std::move(retry)]() {
-            if (revision == m_mediaRevision) retry();
-        };
-        // Latest state follows any intervening commands; commands (empty key)
-        // retain every occurrence. One queue shares all cancellation.
-        if (!stateKey.isEmpty()) {
-            for (auto it = m_deferredInitActions.begin(); it != m_deferredInitActions.end(); ++it) {
-                if (it->stateKey != stateKey) continue;
-                m_deferredInitActions.erase(it);
-                break;
-            }
-        }
-        m_deferredInitActions.append({stateKey, std::move(guardedRetry)});
-        return true;
+void MpvPlayer::enqueueMedia(const QString &operation, const QString &stateKey, std::function<void()> action) {
+    if (!coreAvailable()) { failOperation(operation, MPV_ERROR_UNINITIALIZED); return; }
+    // Latest state follows intervening commands; stateless loads stay in order.
+    if (!stateKey.isEmpty()) {
+        m_deferredInitActions.removeIf([&](const auto &old) { return old.stateKey == stateKey; });
     }
-    return false;
+    m_deferredInitActions.append({stateKey, std::move(action)});
+    drainMedia();
+}
+
+void MpvPlayer::drainMedia() {
+    if (m_private->drainingMedia) return;
+    m_private->drainingMedia = true;
+    QPointer<MpvPlayer> alive(this);
+    while (coreAvailable() && m_rendererInitialized && m_renderError >= 0
+           && !m_deferredInitActions.isEmpty() && !m_private->directoryActive) {
+        const auto action = m_deferredInitActions.takeFirst();
+        action.retry();
+        if (!alive) return;
+    }
+    m_private->drainingMedia = false;
+}
+
+void MpvPlayer::supersedeMedia(bool loadsOnly) {
+    ++m_mediaRevision;
+    if (loadsOnly) {
+        m_deferredInitActions.removeIf([](const auto &action) { return action.stateKey.isEmpty(); });
+    } else {
+        m_deferredInitActions.clear();
+    }
+    ++m_private->directoryTicket;
+    m_private->directoryActive = false;
+    m_private->directoryFiles.clear();
+    if (auto watcher = std::exchange(m_private->directoryWatcher, nullptr)) {
+        watcher->cancel();
+        watcher->deleteLater();
+    }
 }
 
 void MpvPlayer::load(const QString &url, const QString &mode) {
     if (url.isEmpty()) return;
-    if (deferUntilRendererReady(QStringLiteral("load"), {}, [this, url, mode]() { load(url, mode); })) return;
-    submitCommand(QStringList{"loadfile", cleanPath(url), mode});
+    enqueueMedia(QStringLiteral("load"), {}, [this, url, mode]() {
+        submitCommand(QStringList{"loadfile", cleanPath(url), mode}, true);
+    });
 }
 void MpvPlayer::loadDirectory(const QString &path, const QStringList &fileFilters, const QString &mode, const QString &sort) {
     if (path.isEmpty()) return;
-    if (deferUntilRendererReady(QStringLiteral("loadDirectory"), {}, [this, path, fileFilters, mode, sort]() {
-        loadDirectory(path, fileFilters, mode, sort);
-    })) return;
-    const QString directoryPath = cleanPath(path);
-    if (!QFileInfo(directoryPath).isDir()) return;
-    QStringList filters = fileFilters;
+    enqueueMedia(QStringLiteral("loadDirectory"), {}, [this, path, fileFilters, mode, sort]() {
+        scanDirectory(cleanPath(path), fileFilters, mode, sort);
+    });
+}
+
+static DirectoryScan directoryEntries(const QString &path, QStringList filters, const QString &sort) {
+    if (!QFileInfo(path).isDir()) return {DirectoryScan::MissingDirectory, {}};
     if (filters.isEmpty()) filters = {"*.mp4", "*.mkv", "*.avi", "*.webm", "*.mov", "*.mp3", "*.flac"};
     QStringList expanded;
     for (const auto &filter : filters) {
@@ -529,31 +570,72 @@ void MpvPlayer::loadDirectory(const QString &path, const QStringList &fileFilter
     if (sort == "date" || sort == "time") flags |= QDir::Time;
     else if (sort == "size") flags |= QDir::Size;
     else flags |= QDir::Name;
-    const auto files = QDir(directoryPath).entryInfoList(expanded, QDir::Files, flags);
+    const QDir dir(path);
+    const auto files = dir.entryList(expanded, QDir::Files, flags);
+    QStringList result;
+    result.reserve(files.size());
+    for (const auto &file : files) result.append(dir.absoluteFilePath(file));
+    return {result.isEmpty() ? DirectoryScan::NoMatches : DirectoryScan::Found, std::move(result)};
+}
+
+void MpvPlayer::scanDirectory(const QString &path, const QStringList &filters, const QString &mode, const QString &sort) {
+    auto *watcher = new QFutureWatcher<DirectoryScan>(this);
+    const quint64 ticket = ++m_private->directoryTicket;
+    m_private->directoryWatcher = watcher;
+    m_private->directoryActive = true;
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, ticket, mode]() {
+        if (ticket != m_private->directoryTicket) return;
+        m_private->directoryWatcher.clear();
+        auto result = watcher->result();
+        watcher->deleteLater();
+        if (result.status != DirectoryScan::Found) {
+            m_private->directoryActive = false; // missing/empty is a legacy no-op
+            drainMedia();
+            return;
+        }
+        m_private->directoryFiles = std::move(result.files);
+        m_private->directoryIndex = 0;
+        m_private->directoryFirstMode = mode == "replace" ? QStringLiteral("replace") : QStringLiteral("append");
+        dispatchDirectory(ticket);
+    });
+    QPromise<DirectoryScan> promise;
+    promise.start();
+    watcher->setFuture(promise.future());
+    QThreadPool::globalInstance()->start([path, filters, sort, promise = std::move(promise)]() mutable {
+        if (!promise.isCanceled()) promise.addResult(directoryEntries(path, filters, sort));
+        promise.finish();
+    });
+}
+
+void MpvPlayer::dispatchDirectory(quint64 ticket) {
+    if (!coreAvailable() || ticket != m_private->directoryTicket || !m_private->directoryActive) return;
+    if (!m_rendererInitialized || m_renderError < 0) return; // next ready resumes the same batch
     QPointer<MpvPlayer> alive(this);
-    bool first = true;
-    const quint64 revision = m_mediaRevision;
-    for (const auto &file : files) {
-        const QString action = first && mode == "replace" ? QStringLiteral("replace") : QStringLiteral("append");
-        submitCommand(QStringList{"loadfile", file.absoluteFilePath(), action});
-        if (!alive || m_shuttingDown || revision != m_mediaRevision) return;
-        first = false;
+    constexpr int batchSize = 16;
+    for (int i = 0; i < batchSize && m_private->directoryIndex < m_private->directoryFiles.size(); ++i) {
+        const auto index = m_private->directoryIndex++;
+        const auto file = m_private->directoryFiles[index];
+        const auto mode = index == 0 ? m_private->directoryFirstMode : QStringLiteral("append");
+        submitCommand({"loadfile", file, mode}, true);
+        if (!alive || ticket != m_private->directoryTicket || !m_rendererInitialized || m_renderError < 0) return;
     }
+    if (m_private->directoryIndex < m_private->directoryFiles.size()) {
+        QTimer::singleShot(0, this, [this, ticket]() { dispatchDirectory(ticket); });
+        return;
+    }
+    m_private->directoryFiles.clear();
+    m_private->directoryActive = false;
+    drainMedia();
 }
 void MpvPlayer::stop(bool keepPlaylist) {
-    ++m_mediaRevision;
-    m_deferredInitActions.clear();
-    m_pendingTrackSeek = -1;
     const QStringList params = keepPlaylist ? QStringList{"stop", "keep-playlist"} : QStringList{"stop"};
-    const int id = coreAvailable() && m_ctrl ? m_ctrl->commandAsync(params) : MPV_ERROR_UNINITIALIZED;
-    if (id < 0) failOperation(QStringLiteral("stop"), id);
-    else m_requests.insert(id, {0, false, QStringLiteral("stop")});
+    submitCommand(params);
 }
 void MpvPlayer::clearPlaylist() { submitCommand(QStringList{"playlist-clear"}); }
 void MpvPlayer::seekRelative(double seconds) { submitCommand(QStringList{"seek", QString::number(seconds), "relative"}); }
 void MpvPlayer::seekAbsolute(double timestamp) { submitCommand(QStringList{"seek", QString::number(qMax(0.0, timestamp)), "absolute"}); }
-void MpvPlayer::next() { ++m_mediaRevision; m_deferredInitActions.clear(); submitCommand(QStringList{"playlist-next", "force"}); }
-void MpvPlayer::previous() { ++m_mediaRevision; m_deferredInitActions.clear(); submitCommand(QStringList{"playlist-prev", "force"}); }
+void MpvPlayer::next() { submitCommand(QStringList{"playlist-next", "force"}); }
+void MpvPlayer::previous() { submitCommand(QStringList{"playlist-prev", "force"}); }
 void MpvPlayer::frameStep() { submitCommand(QStringList{"frame-step"}); }
 void MpvPlayer::frameBackStep() { submitCommand(QStringList{"frame-back-step"}); }
 void MpvPlayer::markSeekPosition() { submitCommand(QStringList{"revert-seek", "mark"}); }
@@ -567,10 +649,9 @@ void MpvPlayer::selectTrack(const QString &type, int id) {
     else if (type == "video") name = QStringLiteral("vid");
     else if (type == "sub" || type == "subtitle") name = QStringLiteral("sid");
     if (name.isEmpty()) return;
-    if (deferUntilRendererReady(QStringLiteral("selectTrack"), name, [this, type, id]() { selectTrack(type, id); })) return;
-    QPointer<MpvPlayer> alive(this);
-    submitProperty(name, id <= 0 ? QVariant(QStringLiteral("no")) : QVariant(id));
-    if (alive && !m_shuttingDown && type == "video" && !m_source.isEmpty()) { m_pendingTrackSeek = m_position; load(m_source); }
+    enqueueMedia(QStringLiteral("selectTrack"), name, [this, name, id]() {
+        submitProperty(name, id <= 0 ? QVariant(QStringLiteral("no")) : QVariant(id));
+    });
 }
 void MpvPlayer::setVideoFilter(const QString &op, const QString &value) { submitCommand(QStringList{"vf", op, value}); }
 void MpvPlayer::setAudioFilter(const QString &op, const QString &value) { submitCommand(QStringList{"af", op, value}); }
@@ -586,10 +667,11 @@ void MpvPlayer::runExternalProcess(const QStringList &arguments) { if (!argument
 void MpvPlayer::sendScriptMessage(const QStringList &arguments) { if (!arguments.isEmpty()) submitCommand(QStringList{"script-message"} + arguments); }
 void MpvPlayer::triggerScriptBinding(const QString &name) { if (!name.isEmpty()) submitCommand(QStringList{"script-binding", name}); }
 void MpvPlayer::sendMousePosition(int x, int y) {
-    if (deferUntilRendererReady(QStringLiteral("sendMousePosition"), QStringLiteral("mouse-pos"), [this, x, y]() { sendMousePosition(x, y); })) return;
-    QPointer<MpvPlayer> alive(this);
-    submitProperty(QStringLiteral("mouse-pos/x"), x);
-    if (alive && !m_shuttingDown) submitProperty(QStringLiteral("mouse-pos/y"), y);
+    enqueueMedia(QStringLiteral("sendMousePosition"), QStringLiteral("mouse-pos"), [this, x, y]() {
+        QPointer<MpvPlayer> alive(this);
+        submitProperty(QStringLiteral("mouse-pos/x"), x);
+        if (alive && !m_shuttingDown) submitProperty(QStringLiteral("mouse-pos/y"), y);
+    });
 }
 void MpvPlayer::sendMouseClick(int button, bool press) {
     submitCommand(QStringList{press ? "keydown" : "keyup", QStringLiteral("MOUSE_BTN") + QString::number(button - 1)});
@@ -655,8 +737,7 @@ void MpvPlayer::detach(bool notify) {
     m_shuttingDown = true;
     m_coreAvailable = false;
     m_rendererInitialized = false;
-    ++m_mediaRevision;
-    m_deferredInitActions.clear();
+    supersedeMedia();
     m_dirtyProperties.clear();
     m_pendingProperties.clear();
     disconnect(m_private->graphicsConnection);

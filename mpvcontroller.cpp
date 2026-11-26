@@ -6,6 +6,7 @@
  * See UPSTREAM.md. Native input ownership and reply decoding are local fixes.
  */
 #include "mpvcontroller_p.h"
+#include "mpvmediaeffect_p.h"
 
 #include <QByteArray>
 #include <QStringList>
@@ -327,16 +328,11 @@ void MpvController::submitCommand(quint64 token, const QStringList &parameters) 
     m_core->noteNativeToken(token);
     if (!parameters.isEmpty()) {
       const QString &command = parameters[0];
-      const QString mode = parameters.size() > 2 ? parameters[2] : QStringLiteral("replace");
-      const bool changesFile = command == QStringLiteral("loadfile")
-          && mode != QStringLiteral("append")
-          && !(mode == QStringLiteral("append-play") && m_playback.loaded);
-      if (changesFile || command == QStringLiteral("loadlist")
-          || command == QStringLiteral("stop") || command == QStringLiteral("quit")
-          || command == QStringLiteral("playlist-next") || command == QStringLiteral("playlist-prev")
-          || command == QStringLiteral("playlist-play-index"))
+      const auto effect = commandMediaEffect(parameters);
+      if (effect == MediaEffect::Replace || (effect == MediaEffect::ReplaceIfIdle && !m_playback.loaded))
         invalidatePlaybackIntent();
-      if (command == QStringLiteral("seek") || command == QStringLiteral("revert-seek")) {
+      if (effect == MediaEffect::Pause) ++m_pauseRevision;
+      if (effect == MediaEffect::Seek) {
         ++m_seekRevision;
         m_seekIntent.valid = false;
         if (command == QStringLiteral("seek") && parameters.size() > 1) {
@@ -366,18 +362,18 @@ void MpvController::submitPropertySet(quint64 token, const QString &name,
   int error = MPV_ERROR_UNINITIALIZED;
   if (available()) {
     m_core->noteNativeToken(token);
-    if (name == QStringLiteral("pause"))
+    const auto effect = propertyMediaEffect(name);
+    if (effect == MediaEffect::Pause)
       ++m_pauseRevision;
-    if (name == QStringLiteral("time-pos")) {
+    if (effect == MediaEffect::Seek) {
       ++m_seekRevision;
       m_seekIntent.valid = false;
       bool valid = false;
       const double position = value.toDouble(&valid);
-      if (valid && std::isfinite(position) && position >= 0)
+      if (name != QStringLiteral("percent-pos") && valid && std::isfinite(position) && position >= 0)
         rememberSeekIntent(position);
     }
-    if (name == QStringLiteral("playlist-pos") || name == QStringLiteral("playlist-current-pos")
-        || name == QStringLiteral("path"))
+    if (effect == MediaEffect::Replace)
       invalidatePlaybackIntent();
     MpvInputNode input;
     error = input.assign(value);
@@ -414,7 +410,7 @@ void MpvController::observe(const QString &name, mpv_format format, quint64 toke
 }
 
 void MpvController::invalidatePlaybackIntent() {
-  m_core->advanceSourceIntent();
+  m_admittedMediaEpoch = m_core->advanceSourceIntent();
   m_recovery.valid = false;
   m_playback = {};
   m_terminatedPlayback = {};
@@ -663,11 +659,12 @@ void MpvController::drain(quint64 generation) {
       const bool renderLossAdvance = m_recovery.valid && m_recovery.terminated
           && m_recovery.playback.intent == m_core->sourceIntent()
           && m_core->retiringContext(m_recovery.playback.intent) == m_recovery.retiredRenderer;
-      if (!resumed && !renderLossAdvance && m_playback.entryId >= 0 && entryId != m_playback.entryId)
+      if (!resumed && !renderLossAdvance && m_playback.entryId >= 0 && entryId != m_playback.entryId
+          && m_admittedMediaEpoch == m_core->sourceIntent())
         invalidatePlaybackIntent();
       m_playback = resumed ? m_recovery.playback : PlaybackState{};
       m_playback.entryId = entryId;
-      m_playback.intent = m_core->sourceIntent();
+      m_playback.intent = m_admittedMediaEpoch;
       m_playback.paused = m_observedPause;
       m_playback.pauseRevision = m_pauseRevision;
       m_playback.loaded = false;

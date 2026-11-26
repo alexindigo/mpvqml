@@ -263,9 +263,13 @@ private:
     void failOperation(const QString &operation, int error);
     quint64 propertyIntent(const QString &name, const QVariant &value);
     void flushProperty(const QString &name, quint64 revision);
-    bool deferUntilRendererReady(const QString &operation, const QString &stateKey, std::function<void()> retry);
+    void enqueueMedia(const QString &operation, const QString &stateKey, std::function<void()> action);
+    void drainMedia();
+    void supersedeMedia(bool loadsOnly = false);
+    void scanDirectory(const QString &path, const QStringList &filters, const QString &mode, const QString &sort);
+    void dispatchDirectory(quint64 ticket);
     void submitProperty(const QString &name, const QVariant &value);
-    void submitCommand(const QStringList &params);
+    void submitCommand(const QStringList &params, bool orderedLoad = false);
     void rendererStatus(quint64 generation, bool ready, int error, const QString &message);
     void observeWindow(QQuickWindow *window);
     void detach(bool notify);
@@ -302,7 +306,6 @@ private:
     QHash<QString, std::function<void(const QVariant &)>> m_propertyHandlers;
     QVariantMap m_pendingRenderParams;
     QVariantMap m_lastError{{QStringLiteral("code"), 0}, {QStringLiteral("message"), QString()}};
-    double m_pendingTrackSeek = -1.0;
     bool m_rendererInitialized = false;
     bool m_coreAvailable = false;
     bool m_shuttingDown = false;

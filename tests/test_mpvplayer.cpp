@@ -277,6 +277,7 @@ private slots:
     m_player->adjustProperty("volume", 1);
     QCOMPARE(m_mockCtrl->m_lastCommand, QStringList({"add", "volume", "1"}));
     m_player->rendererStatus(0, true, MPV_ERROR_SUCCESS, {});
+    QTRY_COMPARE(m_mockCtrl->m_commands.size(), 3);
     QCOMPARE(m_mockCtrl->m_setValues.value("volume").toDouble(), 36.0);
     QCOMPARE(m_mockCtrl->m_setValues.value("keepaspect").toString(), QStringLiteral("no"));
     QCOMPARE(m_mockCtrl->m_setValues.value("aid").toInt(), 2);
@@ -358,7 +359,7 @@ private slots:
       {"command", QStringList{"loadfile", video.fileName(), "append"}}, {"set", "aid", "no"},
       {"set", "vid", 7}, {"set", "mouse-pos/x", 9}, {"set", "mouse-pos/y", 10}
     };
-    QCOMPARE(m_mockCtrl->m_submissions, expected);
+    QTRY_COMPARE(m_mockCtrl->m_submissions, expected);
     QVERIFY(m_player->m_deferredInitActions.isEmpty());
   }
 
@@ -1213,7 +1214,7 @@ private slots:
 
     m_mockCtrl->reset();
     m_player->loadDirectory(tmpDir, QStringList{}, QStringLiteral("append"));
-    QVERIFY(m_mockCtrl->m_commandCount >= 1);
+    QTRY_COMPARE(m_mockCtrl->m_commandCount, 1);
     QCOMPARE(m_mockCtrl->m_lastCommand.at(0), QStringLiteral("loadfile"));
     QCOMPARE(m_mockCtrl->m_lastCommand.at(2), QStringLiteral("append"));
 

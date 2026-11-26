@@ -153,8 +153,8 @@ player.loadDirectory("/path/to/videos", ["*.mp4", "*.mkv"], "replace", "name")
 | Method | Description |
 |---|---|
 | `load(url, mode)` | Load a media file or URL. `mode`: `"replace"` (default), `"append"`, `"append-play"`. |
-| `loadDirectory(path, fileFilters, mode, sortOrder)` | Scan a directory and load matching files. `sortOrder`: `"name"`, `"date"`, `"size"`. |
-| `clearPlaylist()` | Remove all items from the playlist. |
+| `loadDirectory(path, fileFilters, mode, sortOrder)` | Scan off the GUI thread and load matches in order. `"replace"` starts the first match and appends the rest. All other modes, including `"append-play"`, append without starting playback. Missing directories and empty matches leave the playlist unchanged. `sortOrder`: `"name"`, `"date"`, `"size"`. |
+| `clearPlaylist()` | Remove every entry except the one playing, and cancel deferred playlist loads. Use `stop()` to also end playback and clear the playlist. |
 | `stop(keepPlaylist)` | Stop playback. `keepPlaylist`: `false` clears the playlist, `true` keeps it. |
 
 ### Playback control
@@ -197,6 +197,9 @@ player.selectTrack("subtitle", 0)     // disable subtitles
 | `addVideoTrack(url)` | Append an external video track. |
 | `addSubtitleTrack(url)` | Append an external subtitle file. |
 | `selectTrack(type, id)` | Select a track by type (`"audio"`, `"video"`, `"sub"`, `"subtitle"`) and ID. ID `0` disables the track type. |
+
+Video track selection changes the active entry in place; it does not reload the
+`source` URL or schedule a seek on a later file load.
 
 ### Video and audio filters
 

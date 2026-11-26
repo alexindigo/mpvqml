@@ -118,6 +118,47 @@ public:
 class TestRenderer : public QObject {
   Q_OBJECT
 private slots:
+  void clearPlaylistKeepsPlayingEntryAndTrackSelectionKeepsItsPixels() {
+    TestWindow window;
+    window.resize(160, 120);
+    auto *player = new MpvPlayer(window.contentItem());
+    player->setSize(window.size());
+    connect(&window, &QQuickWindow::widthChanged, player, [player](int value) { player->setWidth(value); });
+    connect(&window, &QQuickWindow::heightChanged, player, [player](int value) { player->setHeight(value); });
+    player->setHwdec("no");
+    player->setLoopFile("inf");
+    player->setSource(QStringLiteral(MPVQML_TEST_VIDEO));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto center = [&]() {
+      const auto frame = window.grabWindow();
+      return frame.isNull() ? QColor{} : frame.pixelColor(frame.width() / 2, frame.height() / 2);
+    };
+    auto blue = [&]() { const auto p = center(); return p.blue() > 150 && p.red() < 80; };
+    auto red = [&]() { const auto p = center(); return p.red() > 150 && p.blue() < 80; };
+    QTRY_VERIFY_WITH_TIMEOUT(player->rendererReady() && blue(), 5000);
+    player->setPaused(true);
+    const auto entry = [&]() { return player->playlist().value(0).toMap().value("trackId"); };
+    const auto redPath = QFileInfo(QStringLiteral(MPVQML_TEST_VIDEO)).dir().filePath("test_two_video.mp4");
+    player->load(redPath, "append");
+    QTRY_COMPARE(player->playlist().size(), 2);
+    const auto first = entry();
+    QVERIFY(first.isValid());
+    player->clearPlaylist();
+    QTRY_COMPARE(player->playlist().size(), 1);
+    QCOMPARE(entry(), first);
+    QVERIFY(blue());
+
+    player->addVideoTrack(redPath);
+    QTRY_VERIFY_WITH_TIMEOUT(red(), 5000);
+    QSignalSpy loaded(player, &MpvPlayer::fileLoaded);
+    player->selectTrack("video", 1);
+    QTRY_VERIFY_WITH_TIMEOUT(blue(), 5000);
+    QCOMPARE(entry(), first);
+    QCOMPARE(loaded.size(), 0);
+    QVERIFY(player->paused());
+  }
+
   void survivorPixelsContinueAcrossPeerDeletion() {
     TestWindow survivor;
     survivor.resize(160, 120);

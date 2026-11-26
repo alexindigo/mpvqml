@@ -8,7 +8,7 @@ MpvQt classes are not part of the public API or runtime dependency graph.
 |---|---|---|
 | Core creation/initialization | `coreAvailable`, initialization result/failure | Shared native permit owns creation, stage/code and unpublished cleanup; worker/controller supplies playback options |
 | Rendering | `rendererReady`, `ready`, render result/failure | Private synchronized FBO renderer; OpenGL only |
-| Media load/navigation/playlist | Typed methods/properties in API.md | GUI intent/deferred-load handling, then queued interface commands |
+| Media load/navigation/playlist | Typed methods/properties in API.md | Shared effect classification, cancellable ordered media admission, worker-side directory scan and bounded dispatch. `clearPlaylist()` preserves the playing entry. |
 | Typed property writes | Writable Q_PROPERTY setters | GUI dirty/pending/revision pipeline, then queued interface writes |
 | Generic property writes | `setMpvPropertyAsync(name, value)` | Adapter ID/token correlation → `mpv_set_property_async` with owned nodes |
 | Generic property reads | `readMpvPropertyAsync(name)` | Adapter correlation → `mpv_get_property_async`, owned result envelopes |

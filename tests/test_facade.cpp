@@ -222,6 +222,91 @@ private slots:
         QCOMPARE(mock.m_commandCount, 2);
     }
 
+    void knownMediaEffectsSupersedeDeferredLoads_data() {
+        QTest::addColumn<QString>("operation");
+        for (const char *op : {"raw-stop", "raw-next", "raw-playlist-pos", "clear", "raw-clear"})
+            QTest::newRow(op) << QString::fromLatin1(op);
+    }
+
+    void knownMediaEffectsSupersedeDeferredLoads() {
+        QFETCH(QString, operation);
+        MockMpvController mock;
+        MpvPlayer player(nullptr, &mock);
+        player.load("old.mp4");
+        if (operation == "raw-stop") QVERIFY(player.commandAsync({"stop"}) > 0);
+        if (operation == "raw-next") QVERIFY(player.commandAsync({"playlist-next", "force"}) > 0);
+        if (operation == "raw-playlist-pos") QVERIFY(player.setMpvPropertyAsync("playlist-pos", 1) > 0);
+        if (operation == "clear") player.clearPlaylist();
+        if (operation == "raw-clear") QVERIFY(player.commandAsync({"playlist-clear"}) > 0);
+        mock.reset();
+        emit player.ready();
+        QCOMPARE(mock.m_commandCount, 0);
+    }
+
+    void reentrantClearCancelsSourceAndPreservesDeferredTrackSelection() {
+        MockMpvController mock;
+        MpvPlayer player(nullptr, &mock);
+        player.selectTrack("audio", 2);
+        connect(&player, &MpvPlayer::sourceChanged, &player, [&]() {
+            player.selectTrack("video", 3);
+            player.clearPlaylist();
+        });
+        player.setSource("deferred.mp4");
+        QCOMPARE(mock.m_commands, QList<QStringList>{{"playlist-clear"}});
+        emit player.ready();
+        QCOMPARE(mock.m_commands, QList<QStringList>{{"playlist-clear"}});
+        QCOMPARE(mock.m_setValues.value("vid"), QVariant(3));
+    }
+
+    void videoTrackSelectionHasNoUnscopedContinuation_data() {
+        QTest::addColumn<QString>("superseding");
+        for (const char *op : {"source", "next", "seek"}) QTest::newRow(op) << QString::fromLatin1(op);
+    }
+
+    void videoTrackSelectionHasNoUnscopedContinuation() {
+        QFETCH(QString, superseding);
+        MockMpvController mock;
+        MpvPlayer player(nullptr, &mock);
+        player.setSource("first.mp4");
+        emit player.ready();
+        player.load("other.mp4"); // source is not the currently loaded entry
+        emit mock.propertyChanged("time-pos", 7.0);
+        mock.reset();
+        player.selectTrack("video", 2);
+        QCOMPARE(mock.m_setValues.value("vid"), QVariant(2));
+        QCOMPARE(mock.m_commandCount, 0);
+        if (superseding == "source") player.setSource("new.mp4");
+        if (superseding == "next") player.next();
+        if (superseding == "seek") player.seekAbsolute(1.0);
+        mock.reset();
+        emit mock.fileLoaded();
+        QCOMPARE(mock.m_commandCount, 0);
+    }
+
+    void directoryWorkReturnsBeforeDispatchAndCanBeSuperseded() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        for (const char *name : {"b.mp4", "a.MP4", "z.mp4"}) {
+            QFile file(dir.filePath(QString::fromLatin1(name)));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+        }
+        MockMpvController mock;
+        MpvPlayer player(nullptr, &mock);
+        emit player.ready();
+        player.loadDirectory(dir.path());
+        QCOMPARE(mock.m_commandCount, 0);
+        player.clearPlaylist();
+        player.loadDirectory(dir.path(), {}, "append-play", "name"); // legacy append-only
+        player.load("after.mp4", "append");
+        QTRY_COMPARE(mock.m_commandCount, 5);
+        const QList<QStringList> expected{
+            {"playlist-clear"}, {"loadfile", dir.filePath("a.MP4"), "append"},
+            {"loadfile", dir.filePath("b.mp4"), "append"}, {"loadfile", dir.filePath("z.mp4"), "append"},
+            {"loadfile", "after.mp4", "append"},
+        };
+        QCOMPARE(mock.m_commands, expected);
+    }
+
     void reentrantSetterKeepsNewerIntentAndDeletionIsSafe() {
         MockMpvController mock;
         auto *player = new MpvPlayer(nullptr, &mock);
