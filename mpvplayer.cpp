@@ -726,12 +726,13 @@ void MpvPlayer::scanDirectory(const QString &path, const QStringList &filters, c
         m_private->directoryFirstMode = mode == "replace" ? QStringLiteral("replace") : QStringLiteral("append");
         dispatchDirectory(ticket);
     });
-    QPromise<DirectoryScan> promise;
-    promise.start();
-    watcher->setFuture(promise.future());
-    QThreadPool::globalInstance()->start([path, filters, sort, promise = std::move(promise)]() mutable {
-        if (!promise.isCanceled()) promise.addResult(directoryEntries(path, filters, sort));
-        promise.finish();
+    // Qt 6.5 takes std::function, so the task must be copyable.
+    auto promise = std::make_shared<QPromise<DirectoryScan>>();
+    promise->start();
+    watcher->setFuture(promise->future());
+    QThreadPool::globalInstance()->start([path, filters, sort, promise = std::move(promise)]() {
+        if (!promise->isCanceled()) promise->addResult(directoryEntries(path, filters, sort));
+        promise->finish();
     });
 }
 
