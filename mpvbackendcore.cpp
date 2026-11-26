@@ -15,7 +15,6 @@
 #include <cerrno>
 #include <clocale>
 #include <cstdlib>
-#include <cstring>
 #include <dlfcn.h>
 #include <link.h>
 #include <new>
@@ -83,12 +82,8 @@ public:
       }
       int started = 0;
       for (; started < 2; ++started) {
-        int result = pthread_create(&m_threads[started], nullptr, &run, this);
-        if (result != 0) {
-          m_error = QStringLiteral("Cannot start native retirement worker: ")
-              + QString::fromLocal8Bit(std::strerror(result));
+        if (pthread_create(&m_threads[started], nullptr, &run, this) != 0)
           break;
-        }
       }
       if (started != 2) {
         // Bootstrap has admitted no cores. The first worker cannot be in
@@ -98,6 +93,9 @@ public:
           sem_post(&m_work);
         for (int i = 0; i < started; ++i)
           pthread_join(m_threads[i], nullptr);
+        sem_destroy(&m_work);
+        // Completing call_once on failure makes the service error sticky.
+        m_error = QStringLiteral("Cannot start native retirement worker");
         return;
       }
       m_ready = true;
