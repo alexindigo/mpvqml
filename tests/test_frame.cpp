@@ -292,24 +292,12 @@ private slots:
       QCOMPARE(QFile::symLinkTarget(path), copiedSource);
   }
 
-  void cancelThenCapture() {
-    auto input = asset("test_frame_seek.webm");
-    auto output = target("cancelled.png");
+  void rejectsUnknownCancellationThroughQmlType() {
     QSignalSpy replies(capture.get(), SIGNAL(finished(int,QString,QString)));
-    int id = start(input, 0.75, output);
-    QVERIFY(id > 0);
-    bool cancelled = false;
-    QVERIFY(QMetaObject::invokeMethod(capture.get(), "cancel", Q_RETURN_ARG(bool, cancelled), Q_ARG(int, id)));
-    QVERIFY(cancelled);
+    bool cancelled = true;
+    QVERIFY(QMetaObject::invokeMethod(capture.get(), "cancel", Q_RETURN_ARG(bool, cancelled), Q_ARG(int, -1)));
+    QVERIFY(!cancelled);
     QVERIFY(replies.isEmpty());
-    int next = start(input, 0, target("after.png"));
-    QVERIFY(next > id);
-    QTRY_COMPARE_WITH_TIMEOUT(replies.size(), 2, 8000);
-    QCOMPARE(replies[0][0].toInt(), id);
-    QCOMPARE(replies[0][1].toString(), QString("cancelled"));
-    QCOMPARE(replies[1][0].toInt(), next);
-    QVERIFY2(replies[1][1].toString().isEmpty(), qPrintable(replies[1][2].toString()));
-    QVERIFY(!QFile::exists(output.toLocalFile()));
   }
 };
 

@@ -294,9 +294,14 @@ private slots:
     QTRY_COMPARE_WITH_TIMEOUT(faults.counter(cancelWins ? FaultCaptureRenderEntered : FaultCapturePublishEntered), 1, 5000);
     QVERIFY(!QFile::exists(path));
     QCOMPARE(capture.cancel(id), cancelWins);
+    int next = 0;
+    const auto nextPath = temp.filePath("after-cancel.png");
     if (cancelWins) {
       QTRY_COMPARE(replies.size(), 1);
       QVERIFY(releases.isEmpty());
+      next = capture.capture(QUrl::fromLocalFile(MPVQML_CRASH_SEEK_VIDEO), 0, 123, 88,
+                             QUrl::fromLocalFile(nextPath));
+      QVERIFY(next > id);
     }
     if (competitor) {
       QFile sentinel(path);
@@ -304,13 +309,19 @@ private slots:
       QCOMPARE(sentinel.write("other writer"), 12);
     }
     faults.release();
-    QTRY_COMPARE_WITH_TIMEOUT(releases.size(), 1, 8000);
-    QCOMPARE(replies.size(), 1);
+    const int expectedJobs = cancelWins ? 2 : 1;
+    QTRY_COMPARE_WITH_TIMEOUT(releases.size(), expectedJobs, 8000);
+    QCOMPARE(replies.size(), expectedJobs);
     QCOMPARE(replies[0][0].toInt(), id);
     QCOMPARE(replies[0][1].toString(), cancelWins ? "cancelled" : competitor ? "write-failed" : "");
     QCOMPARE(MpvCoreLease::outstandingReservations(), 0);
     if (cancelWins) {
       QVERIFY(!QFile::exists(path));
+      QCOMPARE(replies[1][0].toInt(), next);
+      QVERIFY2(replies[1][1].toString().isEmpty(), qPrintable(replies[1][2].toString()));
+      const QImage image(nextPath);
+      QCOMPARE(image.size(), QSize(123, 69));
+      QVERIFY(image.pixelColor(61, 34).red() > 210);
     } else if (competitor) {
       QFile sentinel(path);
       QVERIFY(sentinel.open(QIODevice::ReadOnly));
@@ -320,7 +331,7 @@ private slots:
       QCOMPARE(image.size(), QSize(123, 69));
       QVERIFY(image.pixelColor(61, 34).red() > 210);
     }
-    QCOMPARE(QDir(temp.path()).entryList(QDir::Files | QDir::Hidden).size(), cancelWins ? 0 : 1);
+    QCOMPARE(QDir(temp.path()).entryList(QDir::Files | QDir::Hidden).size(), 1);
     qInfo().noquote() << "FAULT_CASE_EXERCISED" << fixtureName;
   }
 
@@ -380,6 +391,7 @@ private slots:
     QVERIFY(filter.id > 0);
     QTRY_COMPARE_WITH_TIMEOUT(order.size(), 2, 5000);
     QVERIFY(filter.cancelled);
+    QCoreApplication::sendPostedEvents(&capture, QEvent::MetaCall);
     QCOMPARE(order, QStringList({"cancelled", "released"}));
     qInfo() << "FAULT_CASE_EXERCISED captureCancellationBeforeRetiredDelivery";
   }
