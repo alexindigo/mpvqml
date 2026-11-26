@@ -341,7 +341,8 @@ private slots:
 
     void knownMediaEffectsSupersedeDeferredLoads_data() {
         QTest::addColumn<QString>("operation");
-        for (const char *op : {"raw-stop", "raw-next", "raw-playlist-pos", "clear", "raw-clear"})
+        for (const char *op : {"raw-stop", "prefixed-stop", "prefixed-set", "raw-next",
+                               "raw-playlist-pos", "clear", "raw-clear"})
             QTest::newRow(op) << QString::fromLatin1(op);
     }
 
@@ -351,6 +352,13 @@ private slots:
         MpvPlayer player(nullptr, &mock);
         player.load("old.mp4");
         if (operation == "raw-stop") QVERIFY(player.commandAsync({"stop"}) > 0);
+        if (operation == "prefixed-stop" || operation == "prefixed-set") {
+            const QStringList command = operation == "prefixed-stop"
+                ? QStringList{"no-osd", "async", "stop"}
+                : QStringList{"no-osd", "set", "playlist-pos", "0"};
+            QVERIFY(player.commandAsync(command) > 0);
+            QCOMPARE(mock.m_lastCommand, command);
+        }
         if (operation == "raw-next") QVERIFY(player.commandAsync({"playlist-next", "force"}) > 0);
         if (operation == "raw-playlist-pos") QVERIFY(player.setMpvPropertyAsync("playlist-pos", 1) > 0);
         if (operation == "clear") player.clearPlaylist();
@@ -358,6 +366,16 @@ private slots:
         mock.reset();
         emit player.ready();
         QCOMPARE(mock.m_commandCount, 0);
+    }
+
+    void readOnlyPathWriteKeepsDeferredLoad() {
+        MockMpvController mock;
+        MpvPlayer player(nullptr, &mock);
+        player.load("old.mp4");
+        QVERIFY(player.setMpvPropertyAsync("path", "ignored.mp4") > 0);
+        mock.reset();
+        emit player.ready();
+        QCOMPARE(mock.m_lastCommand, QStringList({"loadfile", "old.mp4", "replace"}));
     }
 
     void reentrantClearCancelsSourceAndPreservesDeferredTrackSelection() {
