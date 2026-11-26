@@ -14,6 +14,7 @@
 #include <mpv/render_gl.h>
 
 class QOpenGLContext;
+class QRunnable;
 
 namespace MpvQmlPrivate {
 
@@ -31,8 +32,12 @@ public:
   void synchronize(QQuickFramebufferObject *item) override;
   QOpenGLFramebufferObject *createFramebufferObject(const QSize &size) override;
   void render() override;
+  // Created during synchronization, scheduled by the facade on its window.
+  // Holds no item/renderer pointer and cannot prolong native ownership.
+  std::unique_ptr<QRunnable> releaseJob() const;
 
 private:
+  struct ContextOwner;
   static void *getProcAddress(void *context, const char *name);
   static void redraw(void *context) noexcept;
   bool createContext();
@@ -42,12 +47,10 @@ private:
   MpvRenderSnapshot m_snapshot;
   std::shared_ptr<MpvRenderDispatcher> m_dispatcher;
   const quint64 m_generation;
-  mpv_render_context *m_context = nullptr;
-  QOpenGLContext *m_creatingContext = nullptr;
+  std::shared_ptr<ContextOwner> m_native;
   bool m_attempted = false;
   bool m_failed = false;
   bool m_ready = false;
-  bool m_ownsContextSlot = false;
   QVariantMap m_appliedParameters;
 };
 

@@ -8,6 +8,7 @@
 #include <QGuiApplication>
 #include <QPointer>
 #include <QQuickWindow>
+#include <QRunnable>
 #include <QSGRendererInterface>
 #include <QUrl>
 #include <QtGui/qguiapplication_platform.h>
@@ -47,6 +48,8 @@ struct MpvPlayer::Private {
     mpv_render_param_type displayType = MPV_RENDER_PARAM_INVALID;
     void *display = nullptr;
     QMetaObject::Connection graphicsConnection;
+    std::unique_ptr<QRunnable> renderRelease;
+    QPointer<QQuickWindow> renderWindow;
     quint64 failedGeneration = 0;
     bool failureReported = false;
 };
@@ -93,12 +96,8 @@ MpvPlayer::MpvPlayer(QQuickItem *parent, MpvControllerIface *ctrl)
     });
     connect(m_ctrl, &MpvControllerIface::coreUnavailable, this, [this]() {
         if (m_shuttingDown) return;
-        m_coreAvailable = false;
-        m_deferredInitActions.clear();
-        m_pendingProperties.clear();
-        m_dirtyProperties.clear();
         QPointer<MpvPlayer> alive(this);
-        emit coreAvailableChanged();
+        shutdown();
         if (alive) failOperation(QStringLiteral("coreUnavailable"), MPV_ERROR_UNINITIALIZED);
     });
     connect(m_ctrl, &MpvControllerIface::operationFailed, this,
@@ -107,7 +106,7 @@ MpvPlayer::MpvPlayer(QQuickItem *parent, MpvControllerIface *ctrl)
     });
     connect(m_ctrl, &QObject::destroyed, this, [this]() {
         m_ctrl = nullptr;
-        if (!m_shuttingDown) { m_coreAvailable = false; emit coreAvailableChanged(); }
+        if (!m_shuttingDown) shutdown();
     });
     connect(m_ctrl, &MpvControllerIface::propertyChanged, this,
             [this](const QString &name, const QVariant &value) {
@@ -193,20 +192,13 @@ MpvPlayer::MpvPlayer(QQuickItem *parent, MpvControllerIface *ctrl)
 }
 
 MpvPlayer::~MpvPlayer() {
-    m_shuttingDown = true;
     // QQuickItem's later base destruction emits windowChanged. Disconnect our
     // derived-class slots before its vtable/private state cease to exist.
     disconnect(this, nullptr, this, nullptr);
-    disconnect(m_private->graphicsConnection);
-    if (m_ctrl) disconnect(m_ctrl, nullptr, this, nullptr);
-    if (m_private) disconnect(m_private->bridge->dispatcher.get(), nullptr, this, nullptr);
-    m_deferredInitActions.clear();
-    m_requests.clear();
-    m_logClient->shutdown();
-    m_hookManager->shutdown();
+    detach(false);
     delete std::exchange(m_logClient, nullptr);
     delete std::exchange(m_hookManager, nullptr);
-    if (m_private->controller) { m_private->controller->shutdown(); delete std::exchange(m_private->controller, nullptr); }
+    delete std::exchange(m_private->controller, nullptr);
     m_ctrl = nullptr;
     // The scenegraph renderer keeps its own core/dispatcher lease until its
     // GL-thread cleanup. Releasing the facade does not join either worker.
@@ -230,7 +222,7 @@ void MpvPlayer::observeWindow(QQuickWindow *attached) {
 
 QQuickFramebufferObject::Renderer *MpvPlayer::createRenderer() const {
     const quint64 generation = m_private->bridge->generation.fetch_add(1) + 1;
-    return new MpvRenderer([this]() {
+    auto *renderer = new MpvRenderer([this]() {
         MpvRenderSnapshot snapshot;
         if (!m_shuttingDown) snapshot.core = m_private->bridge->core;
         snapshot.sourceIntent = snapshot.core ? snapshot.core->sourceIntent() : 0;
@@ -239,6 +231,9 @@ QQuickFramebufferObject::Renderer *MpvPlayer::createRenderer() const {
         snapshot.parameters = m_pendingRenderParams;
         return snapshot;
     }, m_private->bridge->dispatcher, generation);
+    m_private->renderRelease = renderer->releaseJob();
+    m_private->renderWindow = window();
+    return renderer;
 }
 
 void MpvPlayer::rendererStatus(quint64 generation, bool readyValue, int error, const QString &message) {
@@ -652,6 +647,10 @@ void MpvPlayer::hookContinue(quint64 id) {
     if (error < 0) failOperation(QStringLiteral("hookContinue"), error);
 }
 void MpvPlayer::shutdown() {
+    detach(true);
+}
+
+void MpvPlayer::detach(bool notify) {
     if (m_shuttingDown) return;
     m_shuttingDown = true;
     m_coreAvailable = false;
@@ -660,10 +659,21 @@ void MpvPlayer::shutdown() {
     m_deferredInitActions.clear();
     m_dirtyProperties.clear();
     m_pendingProperties.clear();
+    disconnect(m_private->graphicsConnection);
+    disconnect(m_private->bridge->dispatcher.get(), nullptr, this, nullptr);
+    if (m_ctrl) disconnect(m_ctrl, nullptr, this, nullptr);
+    // The job is weak and generation-specific. Qt executes it on the window's
+    // GL thread, including scene-graph cleanup, even if this item no longer
+    // participates in synchronization. Destruction remains a second safe path.
+    if (m_private->renderWindow && m_private->renderRelease) {
+        m_private->renderWindow->scheduleRenderJob(m_private->renderRelease.release(), QQuickWindow::BeforeSynchronizingStage);
+        m_private->renderWindow->update();
+    }
+    update();
     m_logClient->shutdown();
     m_hookManager->shutdown();
     const auto requests = std::exchange(m_requests, {});
-    for (auto it = requests.cbegin(); it != requests.cend(); ++it) {
+    if (notify) for (auto it = requests.cbegin(); it != requests.cend(); ++it) {
         const int id = it.key();
         const RequestOwner owner = it.value();
         QMetaObject::invokeMethod(this, [this, id, owner]() {
@@ -675,6 +685,8 @@ void MpvPlayer::shutdown() {
         }, Qt::QueuedConnection);
     }
     if (m_private->controller) m_private->controller->shutdown();
+    m_private->bridge->core.reset();
+    if (!notify) return;
     QPointer<MpvPlayer> alive(this);
     emit coreAvailableChanged();
     if (alive) emit rendererReadyChanged();

@@ -508,6 +508,15 @@ retain live handles until destruction actually completes. Native render cleanup
 still uses the original GL thread, and this does not bound arbitrary graphics
 driver stalls or delete accepted screenshot files.
 
+`shutdown()` and native core loss both close admission, clear renderer readiness
+and detach the live renderer. The item/window may remain alive; resizing or
+synchronizing it cannot reacquire a core or display another video frame. The
+facade releases its lease without waiting for native retirement. A hidden item
+in a rendering window does not need another item synchronization to release its
+context. If the window itself cannot render, cleanup waits for its next render
+or scene-graph destruction. An injected C++ controller is borrowed and is not
+shut down or deleted by this transition.
+
 ---
 
 ## C++ API/ABI and caller migration

@@ -28,6 +28,12 @@ static char watched_path[4096];
 static _Atomic(FILE *) watched_stream;
 static atomic_uintptr_t last_destroyed_handle;
 static atomic_uintptr_t latest_helper_handle;
+static pthread_mutex_t render_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    mpv_render_context *context;
+    pthread_t thread;
+    int registered;
+} render_owners[32];
 
 int mpvqml_fault_watch_file(const char *path)
 {
@@ -264,7 +270,56 @@ int mpv_render_context_create(mpv_render_context **context, mpv_handle *handle,
     atomic_fetch_add(&counters[FaultRenderCreates], 1);
     if (atomic_load(&flags) & FaultRenderCreate)
         return MPV_ERROR_UNSUPPORTED;
-    return real_create(context, handle, parameters);
+    const int result = real_create(context, handle, parameters);
+    if (result >= 0 && *context) {
+        pthread_mutex_lock(&render_mutex);
+        int index = 0;
+        while (index < 32 && render_owners[index].context)
+            ++index;
+        if (index == 32)
+            _exit(91); /* fixture cannot silently stop observing ownership */
+        render_owners[index].context = *context;
+        render_owners[index].thread = pthread_self();
+        render_owners[index].registered = 0;
+        atomic_fetch_add(&counters[FaultRenderLive], 1);
+        pthread_mutex_unlock(&render_mutex);
+    }
+    return result;
+}
+
+void mpv_render_context_set_update_callback(mpv_render_context *context,
+                                          mpv_render_update_fn callback, void *opaque)
+{
+    void (*real_register)(mpv_render_context *, mpv_render_update_fn, void *)
+        = required_symbol("mpv_render_context_set_update_callback");
+    real_register(context, callback, opaque); /* unregister is a native barrier */
+    pthread_mutex_lock(&render_mutex);
+    for (int index = 0; index < 32; ++index)
+        if (render_owners[index].context == context)
+            render_owners[index].registered = callback != NULL;
+    pthread_mutex_unlock(&render_mutex);
+}
+
+void mpv_render_context_free(mpv_render_context *context)
+{
+    void (*real_free)(mpv_render_context *) = required_symbol("mpv_render_context_free");
+    pthread_mutex_lock(&render_mutex);
+    int index = 0;
+    while (index < 32 && render_owners[index].context != context)
+        ++index;
+    if (index == 32)
+        _exit(92);
+    if (!pthread_equal(render_owners[index].thread, pthread_self()))
+        atomic_fetch_add(&counters[FaultRenderWrongThread], 1);
+    if (render_owners[index].registered)
+        atomic_fetch_add(&counters[FaultRenderFreeWithCallback], 1);
+    pthread_mutex_unlock(&render_mutex);
+    real_free(context);
+    pthread_mutex_lock(&render_mutex);
+    render_owners[index].context = NULL;
+    atomic_fetch_sub(&counters[FaultRenderLive], 1);
+    atomic_fetch_add(&counters[FaultRenderFrees], 1);
+    pthread_mutex_unlock(&render_mutex);
 }
 
 void mpv_set_wakeup_callback(mpv_handle *handle, void (*callback)(void *), void *context)

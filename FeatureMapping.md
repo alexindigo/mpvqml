@@ -50,8 +50,13 @@ item state. Context/ready status is generation-tagged and redraw posting is
 coalesced. Owned same-entry recovery preserves playlist identity, position and
 pause only after matching render-loss termination and unchanged intent.
 
-Renderer teardown unregisters callbacks, makes the documented final non-drawing
-frame handoff, and frees its own context on the original GL thread. Core leases
+Renderer teardown uses a context owner independent of replaceable snapshots.
+It unregisters callbacks, makes the documented final non-drawing
+frame handoff, frees its context on the original GL thread, then releases its
+renderer claim and acquisition lease. Explicit shutdown, native core loss and
+item destruction share facade detach; a weak job on the creating window also
+releases a live hidden item's context without another item synchronization.
+Neither late snapshots nor queued status can reopen a detached player. Core leases
 and helpers retain native ownership until cleanup is safe. Two independent
 native retirement workers and 32 pre-reserved leases keep final-core file I/O
 out of GUI/window destruction; no live handle is dropped on a timeout.

@@ -12,9 +12,11 @@
 #include <QOpenGLFramebufferObject>
 #include <QOpenGLFunctions>
 #include <QQuickOpenGLUtils>
+#include <QRunnable>
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace MpvQmlPrivate {
@@ -230,44 +232,76 @@ void *resolveMpvGlFunction(QOpenGLContext *creating, const char *name) {
   return reinterpret_cast<void *>(real);
 }
 
+struct MpvRenderer::ContextOwner {
+  std::shared_ptr<MpvCoreLease> core;
+  std::shared_ptr<MpvRenderDispatcher> dispatcher;
+  quint64 generation = 0;
+  quint64 sourceIntent = 0;
+  mpv_render_context *context = nullptr;
+  QOpenGLContext *creatingContext = nullptr;
+  bool claimed = false;
+  bool closed = false;
+
+  ~ContextOwner() { release(); }
+
+  void release() {
+    closed = true;
+    // This owner is renderer-affine. The only other entry is a weak render job
+    // on that window's GL thread, never a GUI-side last-owner destructor.
+    if (context) {
+      core->markContextRetiring(generation, sourceIntent);
+      dispatcher->postContextRetiring(generation, sourceIntent);
+      mpv_render_context_set_update_callback(context, nullptr, nullptr);
+      // Consume the VO's pending frame before context free; this is not
+      // cancellation of accepted screenshot file I/O.
+      if (QOpenGLContext::currentContext() == creatingContext
+          && (mpv_render_context_update(context) & MPV_RENDER_UPDATE_FRAME)) {
+        int skip = 1;
+        int block = 0;
+        mpv_render_param releaseFrame[]{
+            {MPV_RENDER_PARAM_SKIP_RENDERING, &skip},
+            {MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, &block},
+            {MPV_RENDER_PARAM_INVALID, nullptr}};
+        mpv_render_context_render(context, releaseFrame);
+      }
+      mpv_render_context_free(context);
+      context = nullptr;
+    }
+    if (claimed) {
+      core->releaseRenderer(generation);
+      claimed = false;
+    }
+    // Callback barrier, pending handoff, native free and claim release all
+    // precede relinquishing the acquisition lease and dispatcher.
+    core.reset();
+    dispatcher.reset();
+  }
+};
+
 MpvRenderer::MpvRenderer(SnapshotSupplier supplier,
                          std::shared_ptr<MpvRenderDispatcher> dispatcher,
                          quint64 generation)
     : m_supplier(std::move(supplier)), m_dispatcher(std::move(dispatcher)),
-      m_generation(generation) {}
+      m_generation(generation), m_native(std::make_shared<ContextOwner>()) {
+  m_native->generation = generation;
+  m_native->dispatcher = m_dispatcher;
+}
 
 MpvRenderer::~MpvRenderer() {
-  // Qt's scenegraph owns this object and makes its GL context current for
-  // node cleanup before destroying the RHI/context (Qt 6.11.2 render loop).
-  // This renderer owns only its own context, never a replacement's context.
-  if (m_context) {
-    m_snapshot.core->markContextRetiring(m_snapshot.generation, m_snapshot.sourceIntent);
-    m_dispatcher->postContextRetiring(m_snapshot.generation, m_snapshot.sourceIntent);
-    mpv_render_context_set_update_callback(m_context, nullptr, nullptr);
-    // The VO can be waiting for the last queued frame when callbacks cease.
-    // Consume it without drawing or waiting for presentation before native
-    // context free requests VO shutdown. Otherwise flip_page waits its 200 ms
-    // missing-render timeout while Qt's GUI is waiting for GL-thread cleanup.
-    // This is a render-API handoff, not cancellation of screenshot file I/O.
-    if (QOpenGLContext::currentContext() == m_creatingContext
-        && (mpv_render_context_update(m_context) & MPV_RENDER_UPDATE_FRAME)) {
-      int skip = 1;
-      int block = 0;
-      mpv_render_param releaseFrame[]{
-          {MPV_RENDER_PARAM_SKIP_RENDERING, &skip},
-          {MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, &block},
-          {MPV_RENDER_PARAM_INVALID, nullptr}};
-      mpv_render_context_render(m_context, releaseFrame);
-    }
-    mpv_render_context_free(m_context);
-    m_context = nullptr;
-  }
-  if (m_ownsContextSlot)
-    m_snapshot.core->releaseRenderer(m_snapshot.generation);
+  // Qt's scene graph makes the creating GL context current for node cleanup.
+  // A replaced or empty configuration cannot overwrite native ownership.
+  m_native.reset();
   if (m_ready)
-    m_dispatcher->postStatus(m_snapshot.generation, false, MPV_ERROR_SUCCESS, {});
+    m_dispatcher->postStatus(m_generation, false, MPV_ERROR_SUCCESS, {});
   // Native callback barrier/free precede release of the strong dispatcher and
   // core lease. Final core destruction is never joined on the rendering thread.
+}
+
+std::unique_ptr<QRunnable> MpvRenderer::releaseJob() const {
+  return std::unique_ptr<QRunnable>(QRunnable::create([weak = std::weak_ptr(m_native)] {
+    if (auto owner = weak.lock()) owner->release();
+    QQuickOpenGLUtils::resetOpenGLState();
+  }));
 }
 
 void MpvRenderer::synchronize(QQuickFramebufferObject *item) {
@@ -276,6 +310,17 @@ void MpvRenderer::synchronize(QQuickFramebufferObject *item) {
   // GUI thread here; subsequent rendering/callback/destruction uses only values.
   m_snapshot = m_supplier();
   m_snapshot.generation = m_generation;
+  // Retain acquisition state outside the replaceable synchronized values.
+  // Do not leave a second lease in the snapshot: a hidden item may not sync
+  // again after the facade schedules the independent release job.
+  auto core = std::exchange(m_snapshot.core, {});
+  if (!core) {
+    m_native->release();
+    m_ready = false;
+  } else if (!m_native->closed) {
+    if (!m_attempted) m_native->core = std::move(core);
+    m_native->sourceIntent = m_snapshot.sourceIntent;
+  }
 }
 
 void *MpvRenderer::getProcAddress(void *context, const char *name) {
@@ -296,21 +341,22 @@ void MpvRenderer::fail(int error, const QString &message) {
 
 bool MpvRenderer::createContext() {
   m_attempted = true;
-  if (!m_snapshot.core || !m_snapshot.core->handle()) {
+  if (m_native->closed) return false;
+  if (!m_native->core || !m_native->core->handle()) {
     fail(MPV_ERROR_UNINITIALIZED, QStringLiteral("No initialized core for mpv rendering"));
     return false;
   }
-  m_creatingContext = QOpenGLContext::currentContext();
-  if (!m_creatingContext || !m_creatingContext->isValid()) {
+  m_native->creatingContext = QOpenGLContext::currentContext();
+  if (!m_native->creatingContext || !m_native->creatingContext->isValid()) {
     fail(MPV_ERROR_UNSUPPORTED, QStringLiteral("No current valid OpenGL context for mpv rendering"));
     return false;
   }
-  if (!m_snapshot.core->claimRenderer(m_snapshot.generation)) {
+  if (!m_native->core->claimRenderer(m_generation)) {
     fail(MPV_ERROR_UNSUPPORTED, QStringLiteral("Overlapping mpv render-context ownership is unsupported"));
     return false;
   }
-  m_ownsContextSlot = true;
-  mpv_opengl_init_params gl{getProcAddress, m_creatingContext};
+  m_native->claimed = true;
+  mpv_opengl_init_params gl{getProcAddress, m_native->creatingContext};
   mpv_render_param parameters[4]{
       {MPV_RENDER_PARAM_API_TYPE, const_cast<char *>(MPV_RENDER_API_TYPE_OPENGL)},
       {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl},
@@ -323,13 +369,13 @@ bool MpvRenderer::createContext() {
     }
     parameters[2] = {m_snapshot.displayType, m_snapshot.nativeDisplay};
   }
-  const int error = mpv_render_context_create(&m_context, m_snapshot.core->handle(), parameters);
-  if (error < 0 || !m_context) {
+  const int error = mpv_render_context_create(&m_native->context, m_native->core->handle(), parameters);
+  if (error < 0 || !m_native->context) {
     fail(error < 0 ? error : MPV_ERROR_GENERIC,
          QString::fromUtf8(mpv_error_string(error < 0 ? error : MPV_ERROR_GENERIC)));
     return false;
   }
-  mpv_render_context_set_update_callback(m_context, &redraw, m_dispatcher.get());
+  mpv_render_context_set_update_callback(m_native->context, &redraw, m_native->dispatcher.get());
   return true;
 }
 
@@ -341,7 +387,7 @@ QOpenGLFramebufferObject *MpvRenderer::createFramebufferObject(const QSize &size
     createContext();
   if (!target || !target->isValid()) {
     fail(MPV_ERROR_VO_INIT_FAILED, QStringLiteral("Cannot create a valid mpv framebuffer target"));
-  } else if (!m_failed && m_context && !m_ready) {
+  } else if (!m_failed && m_native->context && !m_ready) {
     m_ready = true;
     m_dispatcher->postStatus(m_snapshot.generation, true, MPV_ERROR_SUCCESS, {});
   }
@@ -358,7 +404,7 @@ void MpvRenderer::applyParameters() {
     if (it.key() == QStringLiteral("ambient-light")) {
       int lux = it.value().toInt();
       const int error = mpv_render_context_set_parameter(
-          m_context, mpv_render_param{MPV_RENDER_PARAM_AMBIENT_LIGHT, &lux});
+          m_native->context, mpv_render_param{MPV_RENDER_PARAM_AMBIENT_LIGHT, &lux});
       if (error < 0)
         m_dispatcher->postParameterError(m_snapshot.generation, it.key(), error,
                                          QString::fromUtf8(mpv_error_string(error)));
@@ -373,13 +419,13 @@ void MpvRenderer::render() {
     fail(MPV_ERROR_VO_INIT_FAILED, QStringLiteral("mpv framebuffer/OpenGL environment is unavailable"));
     return;
   }
-  if (m_failed || !m_context) {
+  if (m_failed || !m_native->context) {
     current->functions()->glClearColor(0, 0, 0, 0);
     current->functions()->glClear(GL_COLOR_BUFFER_BIT);
     QQuickOpenGLUtils::resetOpenGLState();
     return;
   }
-  if (current != m_creatingContext) {
+  if (current != m_native->creatingContext) {
     fail(MPV_ERROR_UNSUPPORTED, QStringLiteral("mpv render context belongs to a different OpenGL context"));
     current->functions()->glClearColor(0, 0, 0, 0);
     current->functions()->glClear(GL_COLOR_BUFFER_BIT);
@@ -393,7 +439,7 @@ void MpvRenderer::render() {
       {MPV_RENDER_PARAM_OPENGL_FBO, &fbo},
       {MPV_RENDER_PARAM_FLIP_Y, &flip},
       {MPV_RENDER_PARAM_INVALID, nullptr}};
-  const int error = mpv_render_context_render(m_context, parameters);
+  const int error = mpv_render_context_render(m_native->context, parameters);
   if (error < 0) {
     fail(error, QString::fromUtf8(mpv_error_string(error)));
     current->functions()->glClearColor(0, 0, 0, 0);

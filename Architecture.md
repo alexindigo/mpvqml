@@ -73,8 +73,11 @@ API's integer type. Getters never synchronously invoke a live backend.
 ## Rendering and recovery
 
 The renderer invokes its item-supplied value callback only in `synchronize()`
-while Qt blocks GUI mutation. Rendering, native callbacks and teardown use the
-copied core lease, metadata, generation, intent epoch and bounded parameters.
+while Qt blocks GUI mutation. Replaceable configuration is separate from the
+GL-thread context owner. That owner retains its acquisition lease, renderer
+claim, generation, synchronized intent epoch and dispatcher through callback
+unregistration, pending-frame handoff, native free and claim release. Empty
+snapshots cannot erase ownership, and no lease remains in a stale snapshot.
 The native redraw callback accesses only a strongly retained, parentless GUI
 dispatcher. An atomic pending bit limits queued redraw work; item destruction
 disconnects its receivers and retired generations cannot change current status.
@@ -112,6 +115,15 @@ drains are single-entry and check a same-thread QPointer immediately after each
 external signal, then recheck generation/handle identity.
 
 Player/window destruction never joins the live controller or final native core.
+Explicit shutdown, native core loss and item destruction share one detach
+transition: close GUI admission and dispatcher delivery, retire helpers, schedule
+a weak generation-specific release job on the context's original window, stop
+the owned worker and release the facade lease. The release job can retire a
+hidden item without its next synchronization; it never owns an item or native
+resource. Qt runs it with the original GL context, or destroys an unrun job
+without moving native cleanup to the GUI thread. A non-renderable window defers
+release until rendering or scene-graph cleanup. Renderer destruction is the
+same owner's fallback release path. Injected controllers remain borrowed.
 A separately retained worker control survives Qt's finished notification until
 nonblocking `wait(0)` observes actual native/TLS completion. Last core ownership
 transfers its handle to preallocated native retirement storage. Two

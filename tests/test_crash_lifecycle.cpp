@@ -74,7 +74,9 @@ private slots:
     if (fixtureName == "coreInitializationFailure") flags = FaultInitialize;
     if (fixtureName == "partialRetirementBootstrapFailure") failThread = 2;
     if (fixtureName == "workerStartupFailure") failThread = 3;
-    if (fixtureName == "bothWorkersBlockedAndAllLiveLeasesReclaimed") flags = FaultRetirementBarrier;
+    if (fixtureName == "bothWorkersBlockedAndAllLiveLeasesReclaimed"
+        || fixtureName == "attachedShutdownRetiresWhileAlive"
+        || fixtureName == "attachedHiddenShutdownRetiresWhileAlive") flags = FaultRetirementBarrier;
     if (fixtureName == "workerTlsCleanupOutlivesFacade") flags = FaultTlsBarrier;
     if (fixtureName == "publicCoreCreationFailure") flags = FaultCreate;
     if (fixtureName == "publicCoreInitializationFailure") flags = FaultInitialize;
@@ -258,6 +260,10 @@ private slots:
   void publicWorkerStartupFailure() { unavailablePlayer(MPV_ERROR_GENERIC); }
   void ordinaryFileScreenshotRetirement() { screenshotRetirement(false); }
   void fifoScreenshotRetirement() { screenshotRetirement(true); }
+  void attachedShutdownThenDestroyWindow() { attachedDetach(false, false); }
+  void attachedShutdownRetiresWhileAlive() { attachedDetach(false, true); }
+  void attachedNativeQuitRetiresWhileAlive() { attachedDetach(true, false); }
+  void attachedHiddenShutdownRetiresWhileAlive() { attachedDetach(false, true, true); }
   void synchronousHelperRegistration() {
     auto player = std::make_unique<MpvPlayer>();
     QVERIFY(player->coreAvailable());
@@ -463,6 +469,78 @@ private:
     exercised();
   }
 
+  void attachedDetach(bool nativeQuit, bool holdRetirement, bool hideItem = false) {
+    ReleaseBarrier barrier;
+    std::atomic<int> syncCount{0};
+    auto window = std::make_unique<TestWindow>();
+    window->setColor(Qt::black);
+    window->resize(160, 120);
+    window->setPersistentSceneGraph(false);
+    window->setPersistentGraphics(false);
+    auto *player = new MpvPlayer(window->contentItem());
+    player->setSize(window->size());
+    connect(window.get(), &QQuickWindow::widthChanged, player, [player](int value) { player->setWidth(value); });
+    connect(window.get(), &QQuickWindow::heightChanged, player, [player](int value) { player->setHeight(value); });
+    player->setHwdec(QStringLiteral("no"));
+    player->setLoopFile(QStringLiteral("inf"));
+    player->setSource(QStringLiteral(MPVQML_CRASH_VIDEO));
+    window->show();
+    QVERIFY(QTest::qWaitForWindowExposed(window.get()));
+    QTRY_VERIFY_WITH_TIMEOUT(player->rendererReady() && player->hasVideo(), 5000);
+    auto center = [&]() {
+      const QImage image = window->grabWindow();
+      return image.isNull() ? QColor{} : image.pixelColor(image.width() / 2, image.height() / 2);
+    };
+    QTRY_VERIFY_WITH_TIMEOUT([&] {
+      const QColor pixel = center();
+      return pixel.blue() > 150 && pixel.red() < 80 && pixel.green() < 80;
+    }(), 5000);
+    if (hideItem) player->setVisible(false);
+    connect(window.get(), &QQuickWindow::afterSynchronizing, this,
+            [&] { ++syncCount; }, Qt::DirectConnection);
+    window->setColor(QColor("#345678"));
+    if (nativeQuit) {
+      QVERIFY(player->commandAsync(QStringList{"quit"}) > 0);
+      QTRY_VERIFY_WITH_TIMEOUT(!player->coreAvailable(), 5000);
+    } else {
+      player->shutdown();
+    }
+    QVERIFY(!player->coreAvailable());
+    QVERIFY(!player->rendererReady());
+    const int before = syncCount.load();
+    window->resize(220, 160);
+    player->setSize(window->size());
+    player->update();
+    auto stoppedBackground = [&] {
+      const QColor pixel = center();
+      return pixel.isValid() && qAbs(pixel.red() - 0x34) <= 2
+          && qAbs(pixel.green() - 0x56) <= 2 && qAbs(pixel.blue() - 0x78) <= 2;
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(stoppedBackground(), 5000);
+    QVERIFY(syncCount.load() > before);
+    if (!nativeQuit && !holdRetirement)
+      window.reset(); // Previously dereferenced the cleared snapshot at native free.
+    QTRY_COMPARE_WITH_TIMEOUT(faults.counter(FaultRetirementEntered), 1L, 5000);
+    QCOMPARE(faults.counter(FaultRenderCreates), 1L);
+    QCOMPARE(faults.counter(FaultRenderLive), 0L);
+    QCOMPARE(faults.counter(FaultRenderFrees), 1L);
+    QCOMPARE(faults.counter(FaultRenderWrongThread), 0L);
+    QCOMPARE(faults.counter(FaultRenderFreeWithCallback), 0L);
+    if (holdRetirement) {
+      QCOMPARE(faults.counter(FaultRetirementCompleted), 0L);
+      QCOMPARE(MpvCoreLease::outstandingReservations(), 1);
+      faults.release();
+    }
+    QTRY_COMPARE_WITH_TIMEOUT(MpvCoreLease::outstandingReservations(), 0, 5000);
+    QCOMPARE(faults.counter(FaultRetirementCompleted), 1L);
+    if (window) {
+      QVERIFY(stoppedBackground());
+      QVERIFY(player->window() == window.get()); // No item/window teardown needed to retire.
+      QCOMPARE(player->commandAsync(QStringList{"stop"}), MPV_ERROR_UNINITIALIZED);
+    }
+    exercised();
+  }
+
   void screenshotRetirement(bool fifo) {
     ReleaseBarrier barrier;
     QTemporaryDir directory;
@@ -587,7 +665,9 @@ private slots:
                             "publicCoreInitializationFailure", "publicWorkerStartupFailure",
                             "publicRenderFailure", "publicRenderFailureRecoversCallerIntent",
                             "publicRenderFailureRetainsInitialIntent", "ordinaryFileScreenshotRetirement", "fifoScreenshotRetirement",
-                            "synchronousHelperRegistration", "recycledHelperAddressRejectsOldWakeups", "unsupportedGraphicsBackend"})
+                            "synchronousHelperRegistration", "recycledHelperAddressRejectsOldWakeups", "unsupportedGraphicsBackend",
+                            "attachedShutdownThenDestroyWindow", "attachedShutdownRetiresWhileAlive",
+                            "attachedNativeQuitRetiresWhileAlive", "attachedHiddenShutdownRetiresWhileAlive"})
       QTest::newRow(name) << QString::fromLatin1(name);
   }
 

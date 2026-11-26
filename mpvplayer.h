@@ -268,6 +268,7 @@ private:
     void submitCommand(const QStringList &params);
     void rendererStatus(quint64 generation, bool ready, int error, const QString &message);
     void observeWindow(QQuickWindow *window);
+    void detach(bool notify);
     void complete(int id, int error, const QVariant &value, int kind);
     QString m_source;
     bool m_paused = false;
