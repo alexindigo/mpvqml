@@ -419,13 +419,12 @@ void mpv_render_context_free(mpv_render_context *context)
         atomic_fetch_add(&counters[FaultRenderWrongThread], 1);
     if (render_owners[index].registered)
         atomic_fetch_add(&counters[FaultRenderFreeWithCallback], 1);
+    /* The allocation can be reused as soon as native free releases it. */
+    render_owners[index].context = NULL;
     pthread_mutex_unlock(&render_mutex);
     real_free(context);
-    pthread_mutex_lock(&render_mutex);
-    render_owners[index].context = NULL;
     atomic_fetch_sub(&counters[FaultRenderLive], 1);
     atomic_fetch_add(&counters[FaultRenderFrees], 1);
-    pthread_mutex_unlock(&render_mutex);
 }
 
 void mpv_set_wakeup_callback(mpv_handle *handle, void (*callback)(void *), void *context)
