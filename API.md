@@ -412,6 +412,50 @@ See `mpvError` values: `Success`, `EventQueueFull`, `NoMem`,
 
 ---
 
+## Headless video frame capture
+
+`MpvFrameCapture` is a non-visual `MpvQml` type. It needs no Qt Quick
+window, graphics backend or playback item. Give it absolute `file:` URLs
+and a caller-owned private staging directory (which must already exist):
+
+```qml
+import MpvQml
+
+MpvFrameCapture {
+    // capture(sourceUrl, 0.1, 256, 256, privatePngUrl)
+    onFinished: (id, code, reason) => {
+        if (code === "") {
+            // The staged PNG is ready to use or validate before publication.
+        }
+    }
+}
+```
+
+`capture(source, fraction, maxWidth, maxHeight, destination)` selects one
+frame at the given fraction of duration (`0 <= fraction < 1`). A zero
+fraction or unknown/sub-second duration uses the first frame. Bounds are
+positive integers up to 4096 pixels per edge. Output is a PNG fitted within
+the bounds without intentional upscaling, and excludes audio, subtitles
+and playback UI. Regular local files only; user configuration, scripts and
+external file references are disabled. The library does not manage the
+staging directory or a persistent cache.
+
+A positive ID means admitted, not decoded. `finished(id, code, reason)`
+is queued after admission, exactly once per positive ID while the capture
+object exists. Empty `code` means the PNG is committed; otherwise `code`
+identifies the failed stage and `reason` is diagnostic text. Negative
+admission returns are libmpv error codes and get no signal. Two requests
+may run per instance, further subject to the shared native lease limit.
+
+`cancel(id)` returns true if it stopped publication. It queues a
+`cancelled` result and cannot publish that job's PNG. False means the
+request was unknown, previously cancelled, or has begun atomic publication.
+Use unique destinations; a cancelled request retains its worker slot until
+native cleanup finishes. Destruction drops callbacks and cancels any job
+that has not begun publication without joining native work. The capture
+deadline bounds the event wait; a stalled filesystem or native call cannot
+be preempted in-process. A consumer may apply its own waiting deadline.
+
 ## Track and playlist data
 
 `trackList` and `playlist` return mpv data as a list of objects with converted

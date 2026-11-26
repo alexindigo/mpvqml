@@ -6,6 +6,7 @@
  * See UPSTREAM.md. Native input ownership and reply decoding are local fixes.
  */
 #include "mpvcontroller_p.h"
+#include "mpvcorebootstrap_p.h"
 
 #include <QByteArray>
 #include <QStringList>
@@ -13,7 +14,6 @@
 #include <QThread>
 #include <QTimer>
 #include <array>
-#include <clocale>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -264,8 +264,7 @@ void MpvController::initialize() {
     emit initializationFinished(false, m_initialization.error, m_initialization.message);
     return;
   }
-  std::setlocale(LC_NUMERIC, "C");
-  std::unique_ptr<mpv_handle, decltype(&mpv_destroy)> candidate(mpv_create(), mpv_destroy);
+  std::unique_ptr<mpv_handle, decltype(&mpv_destroy)> candidate(createMpvCore(), mpv_destroy);
   int error = MPV_ERROR_GENERIC;
   QString message = QStringLiteral("mpv_create returned null: core creation failed");
   if (candidate) {

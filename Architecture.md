@@ -14,11 +14,18 @@ private implementation. There is no system MpvQt inheritance or linkage.
 | Private production adapter | Positive monotonic public IDs, independent uint64 native tokens, request-kind/generation correlation and exactly-once queued terminal delivery |
 | Injected mock | Controlled availability/owned queued replies with no native core or worker |
 | Private controller/worker | One blocking bootstrap attempt, then worker-affine submissions, observations, owned event decoding and bounded render-loss recovery |
+| Private core bootstrap | Shared entry point for playback and headless core creation; enforces libmpv's process numeric locale requirement |
 | Private render bridge | Value snapshots, shared leases, generation-tagged/coalesced GUI dispatcher, 32-slot admission and two native retirement workers |
 | Private renderer | GL-thread context/FBO/rendering, synchronized snapshot handoff, native callback unregistration and owned-context cleanup |
 | Log/hook helpers | GUI-affine client ownership, immutable registration tokens, generation-aware deletion-safe event drains |
 
 ## Initialization and readiness
+
+Every new core passes through `createMpvCore()`. It serializes creation and
+ensures the process's `LC_NUMERIC` is `C` before libmpv sees it. The host must
+not change this locale while using libmpv. Playback and frame capture still
+own their options, post-creation initialization and retirement independently.
+Log and hook clients attach to an already initialized playback core.
 
 Allocate controller state before startup. Start/check the native Qt worker,
 move the controller only after successful startup, and finish initial native
@@ -115,6 +122,17 @@ code during outstanding cleanup. There is no application-destructor join or
 timeout that drops live handles.
 
 ## Source and verification
+
+`MpvFrameCapture` is a separate non-item facade for a one-shot transaction.
+It uses the shared native admission/DSO pin budget, not the player command
+queue or GL renderer. Each bounded job owns a regular input descriptor, a
+private libmpv client and a software memory render context on the same
+worker. Qt owns only job admission and guarded queued completion. Native
+cleanup keeps its lease and descriptor until the core is gone, without
+joining the GUI thread. A cancelled job cannot cross the publication gate;
+the successful handoff is an atomically written caller-owned staged PNG.
+The guiless QML test instantiates the actual registered type and checks
+both exact-seek pixels and cancellation.
 
 See `UPSTREAM.md` for pinned derivation/notices and `API.md` for the consumer
 contract. Existing suites plus controller, renderer, facade, helper, retirement,

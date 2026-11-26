@@ -34,10 +34,14 @@ qt_add_qml_module(mpvqml
         mpvhookmanager.h
         mpvcontroller.cpp
         mpvcontroller_p.h
+        mpvcorebootstrap.cpp
+        mpvcorebootstrap_p.h
         mpvrenderbridge.cpp
         mpvrenderbridge_p.h
         mpvrenderer.cpp
         mpvrenderer_p.h
+        mpvframecapture.cpp
+        mpvframecapture.h
 )
 
 set_target_properties(mpvqml PROPERTIES VERSION 0.2.0 SOVERSION 0.2)
@@ -91,7 +95,9 @@ install(FILES CMakeLists.txt README.md API.md Architecture.md UPSTREAM.md LICENS
     mpvcontroller_adapter.cpp mpvcontroller_adapter.h
     mpvlogclient.cpp mpvlogclient.h mpvhookmanager.cpp mpvhookmanager.h
     mpvcontroller.cpp mpvcontroller_p.h mpvrenderbridge.cpp mpvrenderbridge_p.h
+    mpvcorebootstrap.cpp mpvcorebootstrap_p.h
     mpvrenderer.cpp mpvrenderer_p.h
+    mpvframecapture.cpp mpvframecapture.h
     DESTINATION ${CMAKE_INSTALL_DATADIR}/mpvqml/source
 )
 install(FILES LICENSES/LGPL-3.0-only.txt
@@ -131,6 +137,14 @@ if(BUILD_TEST_MODE)
 
   enable_testing()
   add_test(NAME mpvqml_cpp_tests COMMAND mpvqml_cpp_tests)
+
+  add_executable(mpvqml_frame_tests tests/test_frame.cpp)
+  target_link_libraries(mpvqml_frame_tests PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Test)
+  target_compile_definitions(mpvqml_frame_tests PRIVATE
+      TEST_IMPORT_PATH="${CMAKE_CURRENT_BINARY_DIR}"
+      TEST_ASSET_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets")
+  add_dependencies(mpvqml_frame_tests mpvqmlplugin)
+  add_test(NAME mpvqml_frame_tests COMMAND mpvqml_frame_tests)
 
   foreach(test_name IN ITEMS controller retirement renderer facade helpers)
     add_executable(mpvqml_${test_name}_tests tests/test_${test_name}.cpp)
