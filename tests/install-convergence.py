@@ -10,6 +10,7 @@ import stat
 import subprocess
 import tempfile
 
+from install_scratch import scratch_parent
 from termination_guard import unwind_on_termination
 
 
@@ -42,9 +43,9 @@ def main():
     includedir = install_dir("INCLUDEDIR")
     # Stage in the product build, then move out of both product trees. This
     # also works for the conventional out-of-source build at source/build.
-    staging = Path(tempfile.mkdtemp(prefix="install-destdir-", dir=build))
-    parent = source.parent if source in build.parents else build.parent
+    parent = scratch_parent(source, build)
     out = Path(tempfile.mkdtemp(prefix=build.name + "-installed-", dir=parent))
+    staging = Path(tempfile.mkdtemp(prefix="install-destdir-", dir=build))
     prefix = out / "prefix"
     external = out / "external"
     external.mkdir()

@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 
+from install_scratch import scratch_parent
 from termination_guard import unwind_on_termination
 
 
@@ -42,8 +43,7 @@ def interrupted_install(build, signum):
     if original_mode == 0 or build.stat().st_uid != os.getuid():
         raise RuntimeError("requires an accessible user-owned generated build")
     process = None
-    parent = source.parent if source in build.parents else build.parent
-    with tempfile.TemporaryDirectory(prefix="install-signal-", dir=parent) as scratch:
+    with tempfile.TemporaryDirectory(prefix="install-signal-", dir=scratch_parent(source, build)) as scratch:
         ready = Path(scratch) / "ready"
         try:
             process = subprocess.Popen(
