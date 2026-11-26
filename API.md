@@ -505,7 +505,10 @@ window, graphics backend or playback item. Give it absolute `file:` URLs
 and a caller-owned private staging directory (which must already exist).
 Publication never replaces an existing file, link, or competing writer's
 result. The staging filesystem must allow hard links within that directory.
-On Linux an accessible `/proc/<pid>/fd/<directory-fd>` may name the directory:
+On Linux an accessible `/proc/<pid>/fd/<directory-fd>` may name the directory.
+Keep that descriptor open through `finished`, or through `capacityReleased`
+if cancellation succeeds; a positive ticket does not mean the worker has
+opened the directory yet.
 
 <!-- capture-example -->
 ```qml
