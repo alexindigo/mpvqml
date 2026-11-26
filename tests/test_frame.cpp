@@ -60,6 +60,36 @@ private slots:
     QVERIFY(value);
   }
 
+  void captureAppliesDisplayRotation_data() {
+    QTest::addColumn<int>("angle");
+    QTest::addColumn<QSize>("size");
+    QTest::addColumn<QString>("quadrants");
+    QTest::newRow("90") << 90 << QSize(49, 88) << QStringLiteral("byrg");
+    QTest::newRow("180") << 180 << QSize(123, 69) << QStringLiteral("ygbr");
+    QTest::newRow("270") << 270 << QSize(49, 88) << QStringLiteral("gryb");
+  }
+
+  void captureAppliesDisplayRotation() {
+    QFETCH(int, angle);
+    QFETCH(QSize, size);
+    QFETCH(QString, quadrants);
+    const auto path = target(qPrintable(QStringLiteral("rotated-%1.png").arg(angle)));
+    QSignalSpy replies(capture.get(), SIGNAL(finished(int,QString,QString)));
+    QVERIFY(start(asset(qPrintable(QStringLiteral("test_frame_rotated_%1.mp4").arg(angle))), 0, path) > 0);
+    QTRY_COMPARE_WITH_TIMEOUT(replies.size(), 1, 8000);
+    QVERIFY2(replies[0][1].toString().isEmpty(), qPrintable(replies[0][2].toString()));
+    const QImage image(path.toLocalFile());
+    QCOMPARE(image.size(), size);
+    for (int i = 0; i < 4; ++i) {
+      const auto pixel = image.pixelColor(size.width() * (i % 2 ? 3 : 1) / 4,
+                                          size.height() * (i / 2 ? 3 : 1) / 4);
+      const auto expected = quadrants.at(i);
+      QCOMPARE(pixel.red() > 128, expected == 'r' || expected == 'y');
+      QCOMPARE(pixel.green() > 128, expected == 'g' || expected == 'y');
+      QCOMPARE(pixel.blue() > 128, expected == 'b');
+    }
+  }
+
   void documentedCaptureExampleStagesPixels() {
     QFile doc(QStringLiteral(TEST_ASSET_PATH "/../../API.md"));
     QVERIFY(doc.open(QIODevice::ReadOnly));

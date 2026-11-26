@@ -7,6 +7,7 @@
 #include <QPointer>
 #include <QSize>
 #include <QTemporaryFile>
+#include <QTransform>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -164,6 +165,14 @@ QSize videoSize(mpv_handle *mpv, QSize bounds) {
 }
 
 Result renderFrame(mpv_handle *mpv, mpv_render_context *render, QSize bounds, QImage &image) {
+  // The filter strips this metadata from the software renderer's input. Read
+  // the pre-filter orientation and apply it ourselves (see UPSTREAM.md).
+  int64_t rotation = 0;
+  if (mpv_get_property(mpv, "video-params/rotate", MPV_FORMAT_INT64, &rotation) < 0 || rotation % 90 != 0)
+    rotation = 0;
+  rotation %= 360;
+  if (rotation % 180 != 0)
+    bounds.transpose();
   const QSize size = videoSize(mpv, bounds);
   if (!size.isValid())
     return {QStringLiteral("no-frame"), QStringLiteral("No video dimensions"), Stage::Render};
@@ -186,6 +195,11 @@ Result renderFrame(mpv_handle *mpv, mpv_render_context *render, QSize bounds, QI
     auto *row = image.scanLine(y);
     for (int x = 0; x < image.width(); ++x)
       row[x * 4 + 3] = 255;
+  }
+  if (rotation != 0) {
+    image = image.transformed(QTransform().rotate(rotation));
+    if (image.isNull())
+      return {QStringLiteral("render-failed"), QStringLiteral("Cannot allocate the oriented frame"), Stage::Render};
   }
   return {};
 }
@@ -333,6 +347,7 @@ struct MpvFrameCapture::Job {
     const auto diagnostic = core.initialize({
         {"config", "no"}, {"terminal", "no"}, {"load-scripts", "no"},
         {"ytdl", "no"}, {"access-references", "no"}, {"vo", "libmpv"},
+        {"vf", "format=rotate=0"},
         {"aid", "no"}, {"sid", "no"}, {"audio-file-auto", "no"}, {"sub-auto", "no"},
         {"pause", "yes"}, {"keep-open", "yes"}, {"hwdec", "no"}, {"vd-lavc-threads", "1"},
         // Limit decoded source pixels independently of the caller's output

@@ -31,6 +31,19 @@ blue from 1 to 2 s. The real and installed capture tests sample the center
 at start and 75% (about 1.5 s), require 123x69 output for a 123x88 bound, and
 use a dominant color threshold greater than 210 with the other channels below
 30 in the installed probe rather than assuming bit-identical conversion.
+
+`test_frame_rotated_{90,180,270}.mp4` have the same 160x90 H.264 stream
+(red/blue/lime/yellow quadrants) but distinct display matrices. To regenerate
+in the VM's scratch directory:
+
+```sh
+ffmpeg -f lavfi -i 'color=blue:s=160x90:r=5:d=1,drawbox=x=0:y=0:w=80:h=45:color=red:t=fill,drawbox=x=0:y=45:w=80:h=45:color=lime:t=fill,drawbox=x=80:y=45:w=80:h=45:color=yellow:t=fill' \
+  -c:v libx264 -pix_fmt yuv420p rotation-landscape.mp4
+for angle in 90 180 270; do
+  ffmpeg -display_rotation "$angle" -i rotation-landscape.mp4 -map 0:v -c:v copy "test_frame_rotated_$angle.mp4"
+done
+```
+
 The standalone QML scans stage their own explicit media set and modification
 times, so adding a file to the shared asset catalog cannot change the playlist
 under test. The fallback case checks exact identities in newest-first order,
