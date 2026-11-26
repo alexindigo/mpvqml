@@ -14,7 +14,7 @@ MpvControllerAdapter::MpvControllerAdapter(QObject *parent) : MpvControllerIface
     connect(controller, &MpvController::endFile, this, &MpvControllerIface::endFile);
     connect(controller, &MpvController::videoReconfig, this, &MpvControllerIface::videoReconfig);
     connect(controller, &MpvController::operationFailed, this, &MpvControllerIface::operationFailed);
-    connect(controller, &MpvController::reply, this, &MpvControllerAdapter::receive);
+    connect(controller, &MpvController::reply, this, &MpvControllerAdapter::receive, Qt::QueuedConnection);
     connect(controller, &MpvController::coreUnavailable, this, [this]() {
         m_available = false;
         settleRequests(MPV_ERROR_UNINITIALIZED);
@@ -88,19 +88,18 @@ void MpvControllerAdapter::receive(const MpvNativeReply &reply) {
 }
 
 void MpvControllerAdapter::finish(const Request &request, int error, const QVariant &value) {
-    QMetaObject::invokeMethod(this, [this, request, error, value]() {
-        switch (request.kind) {
-        case MpvRequestKind::Command: emit asyncCommandFinished(request.id, error, value); break;
-        case MpvRequestKind::PropertySet: emit mpvPropertySetFinished(request.id, error); break;
-        case MpvRequestKind::PropertyRead: emit mpvPropertyReadFinished(request.id, error, value); break;
-        case MpvRequestKind::Configuration: emit configurationFinished(request.id, error); break;
-        }
-    }, Qt::QueuedConnection);
+    switch (request.kind) {
+    case MpvRequestKind::Command: emit asyncCommandFinished(request.id, error, value); break;
+    case MpvRequestKind::PropertySet: emit mpvPropertySetFinished(request.id, error); break;
+    case MpvRequestKind::PropertyRead: emit mpvPropertyReadFinished(request.id, error, value); break;
+    case MpvRequestKind::Configuration: emit configurationFinished(request.id, error); break;
+    }
 }
 
 void MpvControllerAdapter::settleRequests(int error) {
     const auto pending = std::exchange(m_requests, {});
-    for (const Request &request : pending) finish(request, error);
+    for (const Request &request : pending)
+        QMetaObject::invokeMethod(this, [this, request, error]() { finish(request, error); }, Qt::QueuedConnection);
 }
 
 void MpvControllerAdapter::shutdown() {

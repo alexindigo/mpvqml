@@ -351,6 +351,76 @@ private slots:
         QTRY_VERIFY(!guarded);
     }
 
+    void pendingPropertyIgnoresOlderObservationsUntilReadback() {
+        MockMpvController mock;
+        MpvPlayer player(nullptr, &mock);
+        emit player.ready();
+        QCoreApplication::processEvents();
+        mock.m_autoComplete = false;
+        emit mock.propertyChanged("volume", 100.0);
+        player.setVolume(75.0);
+        const int write = mock.m_nextId - 1;
+        emit mock.propertyChanged("volume", 50.0);
+        QCOMPARE(player.volume(), 75.0);
+        emit mock.mpvPropertySetFinished(write, 0);
+        QTRY_COMPARE(mock.m_lastReadProperty, QStringLiteral("volume"));
+        const int olderRead = mock.m_nextId - 1;
+        player.setVolume(80.0);
+        const int newerWrite = mock.m_nextId - 1;
+        emit mock.mpvPropertyReadFinished(olderRead, 0, 75.0);
+        QCoreApplication::processEvents();
+        QCOMPARE(player.volume(), 80.0);
+        emit mock.mpvPropertySetFinished(newerWrite, 0);
+        QTRY_VERIFY(mock.m_nextId > static_cast<quint64>(newerWrite + 1));
+        emit mock.mpvPropertyReadFinished(mock.m_nextId - 1, 0, 79.0);
+        QTRY_COMPARE(player.volume(), 79.0);
+        emit mock.propertyChanged("volume", QVariant());
+        QCOMPARE(player.volume(), 79.0);
+        emit mock.propertyChanged("volume", 81.0);
+        QCOMPARE(player.volume(), 81.0);
+    }
+
+    void rejectedPropertyReturnsToConfirmedState() {
+        MockMpvController mock;
+        MpvPlayer player(nullptr, &mock);
+        emit player.ready();
+        QCoreApplication::processEvents();
+        mock.reset();
+        mock.m_autoComplete = false;
+        emit mock.propertyChanged("volume", 90.0);
+        QSignalSpy failures(&player, &MpvPlayer::operationFailed);
+        player.setVolume(76.0);
+        const int write = mock.m_nextId - 1;
+        emit mock.mpvPropertySetFinished(write, MPV_ERROR_PROPERTY_ERROR);
+        QTRY_COMPARE(failures.size(), 1);
+        QCOMPARE(mock.m_lastReadProperty, QStringLiteral("volume"));
+        emit mock.mpvPropertyReadFinished(mock.m_nextId - 1, MPV_ERROR_PROPERTY_UNAVAILABLE, {});
+        QTRY_COMPARE(player.volume(), 90.0);
+        QCOMPARE(failures.size(), 1); // internal reconciliation is not a caller request
+        mock.m_nextId = static_cast<quint64>(std::numeric_limits<int>::max()) + 1;
+        player.setVolume(33.0);
+        QCOMPARE(player.volume(), 90.0);
+        QCOMPARE(failures.size(), 2);
+    }
+
+    void deferredPropertyClearsSurviveReadiness() {
+        MockMpvController mock;
+        MpvPlayer player(nullptr, &mock);
+        player.setUserShaders(QStringLiteral("custom.glsl"));
+        player.setScreenshotDirectory(QStringLiteral("/configured"));
+        QVERIFY(!player.rendererReady());
+        mock.reset();
+        player.setUserShaders({});
+        player.setScreenshotDirectory({});
+        QCOMPARE(mock.m_setPropertyCount, 0);
+        emit player.ready();
+        QVERIFY(player.rendererReady());
+        QVERIFY(mock.m_setValues.contains("glsl-shaders"));
+        QCOMPARE(mock.m_setValues.value("glsl-shaders"), QVariant(QVariantList()));
+        QVERIFY(mock.m_setValues.contains("screenshot-directory"));
+        QVERIFY(mock.m_setValues.value("screenshot-directory").toString().isEmpty());
+    }
+
     void initialFailureIsVisibleAndOperationsDoNotCreatePendingWork() {
         MockMpvController mock;
         mock.m_initialization = {true, false, MPV_ERROR_GENERIC, QStringLiteral("fixture failure")};

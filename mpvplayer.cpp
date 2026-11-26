@@ -53,6 +53,22 @@ struct DirectoryScan {
 };
 
 struct MpvPlayer::Private {
+    struct Property {
+        mpv_format format = MPV_FORMAT_NONE;
+        std::function<QVariant(const QVariant &)> fromNative;
+        std::function<QVariant(const QVariant &)> toNative;
+        std::function<QVariant(const QVariant &)> normalize;
+        std::function<QVariant()> current;
+        std::function<void(const QVariant &)> publish;
+        QVariant observed;
+        QVariant desired; // invalid means no unresolved intent; an empty string is a real value
+        quint64 revision = 0;
+        quint64 writing = 0;
+        bool queued = false;
+    };
+    QStringList propertyOrder;
+    QHash<QString, Property> properties;
+    QHash<QString, QString> observedAliases;
     MpvControllerAdapter *controller = nullptr;
     std::shared_ptr<MpvRenderBridge> bridge = std::make_shared<MpvRenderBridge>();
     mpv_render_param_type displayType = MPV_RENDER_PARAM_INVALID;
@@ -128,7 +144,11 @@ MpvPlayer::MpvPlayer(QQuickItem *parent, MpvControllerIface *ctrl)
     connect(m_ctrl, &MpvControllerIface::propertyChanged, this,
             [this](const QString &name, const QVariant &value) {
         if (m_shuttingDown) return;
-        if ((!m_rendererInitialized || m_renderError < 0) && m_pendingProperties.contains(name)) return;
+        const QString ownedName = m_private->observedAliases.value(name, name);
+        if (m_private->properties.contains(ownedName)) {
+            observeOwnedProperty(ownedName, value);
+            return;
+        }
         const auto handler = m_propertyHandlers.value(name); // copy before reentrant delivery
         if (handler) handler(value);
     });
@@ -149,22 +169,21 @@ MpvPlayer::MpvPlayer(QQuickItem *parent, MpvControllerIface *ctrl)
     connect(m_ctrl, &MpvControllerIface::videoReconfig, this, [this]() {
         if (!m_shuttingDown) emit videoReconfig();
     });
+    // The production adapter already receives queued worker values. Consume
+    // replies and observations in that order, not on different GUI turns.
+    const auto replyDelivery = ctrl ? Qt::QueuedConnection : Qt::DirectConnection;
     connect(m_ctrl, &MpvControllerIface::asyncCommandFinished, this,
             [this](int id, int error, const QVariant &value) { complete(id, error, value, 0); }, Qt::QueuedConnection);
     connect(m_ctrl, &MpvControllerIface::mpvPropertySetFinished, this,
-            [this](int id, int error) { complete(id, error, {}, 1); }, Qt::QueuedConnection);
+            [this](int id, int error) { complete(id, error, {}, 1); }, replyDelivery);
     connect(m_ctrl, &MpvControllerIface::mpvPropertyReadFinished, this,
-            [this](int id, int error, const QVariant &value) { complete(id, error, value, 2); }, Qt::QueuedConnection);
+            [this](int id, int error, const QVariant &value) { complete(id, error, value, 2); }, replyDelivery);
     connect(m_ctrl, &MpvControllerIface::configurationFinished, this,
             [this](int id, int error) { complete(id, error, {}, 3); }, Qt::QueuedConnection);
     m_initialization = m_ctrl->initialize();
     m_coreAvailable = m_initialization.success && m_ctrl->available();
     if (m_private->controller) m_private->bridge->core = m_private->controller->core();
     setupPropertyObservers();
-    propertyIntent(QStringLiteral("hwdec"), QStringLiteral("auto"));
-    propertyIntent(QStringLiteral("tscale"), m_tscale);
-    propertyIntent(QStringLiteral("keepaspect"), QStringLiteral("yes"));
-    propertyIntent(QStringLiteral("panscan"), 0.0);
     connect(m_logClient, &MpvLogClient::logMessage, this, &MpvPlayer::logMessage);
     connect(m_hookManager, &MpvHookManager::hookTriggered, this, &MpvPlayer::hookTriggered);
     connect(this, &MpvPlayer::ready, this, [this]() {
@@ -283,7 +302,99 @@ void MpvPlayer::rendererStatus(quint64 generation, bool readyValue, int error, c
     }
 }
 
+static QVariant propertyIdentity(const QVariant &value) { return value; }
+static QVariant propertyFlag(const QVariant &value) { return value.toBool(); }
+static QVariant propertyNumber(const QVariant &value) { return value.toDouble(); }
+static QVariant propertyString(const QVariant &value) { return value.toString(); }
+static QVariant propertyYesNo(const QVariant &value) {
+    return value.toBool() ? QStringLiteral("yes") : QStringLiteral("no");
+}
+static QVariant shaderPathList(const QVariant &value) {
+    if (value.metaType() != QMetaType::fromType<QVariantList>()) return value.toString();
+    QStringList paths;
+    for (const auto &path : value.toList()) paths.append(path.toString());
+#ifdef Q_OS_WIN
+    return paths.join(u';');
+#else
+    return paths.join(u':');
+#endif
+}
+static QVariant shaderPathsToNative(const QVariant &value) {
+    // A string "" is parsed as one empty path, not an empty path list.
+    return value.toString().isEmpty() ? QVariant(QVariantList()) : value;
+}
+static QVariant screenshotPath(const QVariant &value) { return cleanPath(value.toString()); }
+static QVariant minimumSpeed(const QVariant &value) { return qMax(0.01, value.toDouble()); }
+static QVariant volumeRange(const QVariant &value) { return qBound(0.0, value.toDouble(), 150.0); }
+static QVariant colorRange(const QVariant &value) { return qBound(-100.0, value.toDouble(), 100.0); }
+static QVariant loopIntent(const QVariant &value) { return value.isValid() ? value : QVariant(QString()); }
+template<class T> static bool propertyEqual(const T &a, const T &b) { return a == b; }
+static bool propertyEqual(double a, double b) { return nearlyEqual(a, b); }
+
+// Order is part of readiness: apply aspect policy first and pause before
+// deferred media admission. Seed only the library's intentional defaults.
+#define OWNED_PROPERTIES(PROPERTY) \
+    PROPERTY(screenshotDirectory, ScreenshotDirectory, const QString &, "screenshot-directory", STRING, propertyString, propertyIdentity, screenshotPath, false) \
+    PROPERTY(loopFile, LoopFile, const QVariant &, "loop-file", NODE, propertyIdentity, propertyString, loopIntent, false) \
+    PROPERTY(loopPlaylist, LoopPlaylist, const QVariant &, "loop-playlist", NODE, propertyIdentity, propertyString, loopIntent, false) \
+    PROPERTY(videoZoom, VideoZoom, double, "video-zoom", DOUBLE, propertyNumber, propertyIdentity, propertyIdentity, false) \
+    PROPERTY(videoPanX, VideoPanX, double, "video-pan-x", DOUBLE, propertyNumber, propertyIdentity, propertyIdentity, false) \
+    PROPERTY(videoPanY, VideoPanY, double, "video-pan-y", DOUBLE, propertyNumber, propertyIdentity, propertyIdentity, false) \
+    PROPERTY(audioPitchCorrection, AudioPitchCorrection, bool, "audio-pitch-correction", FLAG, propertyFlag, propertyYesNo, propertyIdentity, false) \
+    PROPERTY(subVisibility, SubVisibility, bool, "sub-visibility", FLAG, propertyFlag, propertyYesNo, propertyIdentity, false) \
+    PROPERTY(brightness, Brightness, double, "brightness", DOUBLE, propertyNumber, propertyIdentity, colorRange, false) \
+    PROPERTY(contrast, Contrast, double, "contrast", DOUBLE, propertyNumber, propertyIdentity, colorRange, false) \
+    PROPERTY(playbackSpeed, PlaybackSpeed, double, "speed", DOUBLE, propertyNumber, propertyIdentity, minimumSpeed, false) \
+    PROPERTY(mute, Mute, bool, "mute", FLAG, propertyFlag, propertyYesNo, propertyIdentity, false) \
+    PROPERTY(volume, Volume, double, "volume", DOUBLE, propertyNumber, propertyIdentity, volumeRange, false) \
+    PROPERTY(currentAudioDevice, CurrentAudioDevice, const QString &, "audio-device", STRING, propertyString, propertyIdentity, propertyIdentity, false) \
+    PROPERTY(hwdec, Hwdec, const QString &, "hwdec", STRING, propertyString, propertyIdentity, propertyIdentity, true) \
+    PROPERTY(videoSync, VideoSync, const QString &, "video-sync", STRING, propertyString, propertyIdentity, propertyIdentity, false) \
+    PROPERTY(interpolation, Interpolation, bool, "interpolation", FLAG, propertyFlag, propertyYesNo, propertyIdentity, false) \
+    PROPERTY(tscale, Tscale, const QString &, "tscale", STRING, propertyString, propertyIdentity, propertyIdentity, true) \
+    PROPERTY(userShaders, UserShaders, const QString &, "glsl-shaders", NODE, shaderPathList, shaderPathsToNative, propertyIdentity, false) \
+    PROPERTY(ytdl, Ytdl, bool, "ytdl", FLAG, propertyFlag, propertyYesNo, propertyIdentity, false) \
+    PROPERTY(audioDelay, AudioDelay, double, "audio-delay", DOUBLE, propertyNumber, propertyIdentity, propertyIdentity, false) \
+    PROPERTY(subDelay, SubDelay, double, "sub-delay", DOUBLE, propertyNumber, propertyIdentity, propertyIdentity, false) \
+    PROPERTY(paused, Paused, bool, "pause", FLAG, propertyFlag, propertyYesNo, propertyIdentity, false)
+
+namespace {
+const auto aspectName = QStringLiteral("keepaspect");
+const auto scanName = QStringLiteral("panscan");
+}
+
 void MpvPlayer::setupPropertyObservers() {
+    auto registerOwned = [this](const QString &name, Private::Property state, bool seed) {
+        if (seed && coreAvailable()) {
+            state.desired = state.observed;
+            state.revision = 1;
+            state.queued = true;
+        }
+        m_private->propertyOrder.append(name);
+        m_private->properties.insert(name, state);
+        // libmpv's option-change callback notifies the canonical option name,
+        // even when an older spelling is still accepted for writes/reads.
+        const QString observed = m_private->observedAliases.key(name, name);
+        if (state.format != MPV_FORMAT_NONE && m_ctrl && coreAvailable()) m_ctrl->observeProperty(observed, state.format);
+    };
+    // fillMode is an intent for two properties, not a projection of arbitrary
+    // raw keepaspect/panscan combinations.
+    registerOwned(aspectName, {MPV_FORMAT_NONE, propertyIdentity, propertyYesNo, propertyIdentity,
+                               {}, {}, true}, true);
+    registerOwned(scanName, {MPV_FORMAT_NONE, propertyIdentity, propertyIdentity, propertyIdentity,
+                             {}, {}, 0.0}, true);
+    m_private->observedAliases.insert(QStringLiteral("screenshot-dir"), QStringLiteral("screenshot-directory"));
+#define REGISTER(Member, Setter, Type, Native, Format, Decode, Encode, Normalize, Seed) \
+    registerOwned(QStringLiteral(Native), {MPV_FORMAT_##Format, Decode, Encode, Normalize, \
+        [this]() { return QVariant(m_##Member); }, [this](const QVariant &value) { \
+            using Value = decltype(m_##Member); \
+            const auto incoming = value.value<Value>(); \
+            if (propertyEqual(m_##Member, incoming)) return; \
+            m_##Member = incoming; \
+            emit Member##Changed(); \
+        }, QVariant(m_##Member)}, Seed);
+    OWNED_PROPERTIES(REGISTER)
+#undef REGISTER
     auto add = [this](const QString &name, mpv_format format, std::function<void(const QVariant &)> handler) {
         m_propertyHandlers.insert(name, std::move(handler));
         if (m_ctrl && coreAvailable()) m_ctrl->observeProperty(name, format);
@@ -309,26 +420,12 @@ void MpvPlayer::setupPropertyObservers() {
         if (m_hasVideo != video) { m_hasVideo = video; emit hasVideoChanged(); }
     });
     OBSERVE("video-params/h", MPV_FORMAT_INT64, m_videoHeight, toInt, videoHeightChanged);
-    OBSERVE("pause", MPV_FORMAT_FLAG, m_paused, toBool, pausedChanged);
-    OBSERVE_DOUBLE("speed", m_playbackSpeed, playbackSpeedChanged);
-    OBSERVE("mute", MPV_FORMAT_FLAG, m_mute, toBool, muteChanged);
-    OBSERVE("screenshot-directory", MPV_FORMAT_STRING, m_screenshotDirectory, toString, screenshotDirectoryChanged);
-    OBSERVE_DOUBLE("volume", m_volume, volumeChanged);
     OBSERVE_DOUBLE("time-pos", m_position, positionChanged);
     OBSERVE_DOUBLE("duration", m_duration, durationChanged);
     OBSERVE("seeking", MPV_FORMAT_FLAG, m_seeking, toBool, seekingChanged);
     OBSERVE("paused-for-cache", MPV_FORMAT_FLAG, m_isBuffering, toBool, isBufferingChanged);
     add(QStringLiteral("eof-reached"), MPV_FORMAT_FLAG, [this](const QVariant &value) { if (value.toBool()) emit playbackEnded(); });
     OBSERVE("audio-device-list", MPV_FORMAT_NODE, m_audioDeviceList, toList, audioDeviceListChanged);
-    OBSERVE("audio-device", MPV_FORMAT_STRING, m_currentAudioDevice, toString, currentAudioDeviceChanged);
-    OBSERVE("hwdec", MPV_FORMAT_STRING, m_hwdec, toString, hwdecChanged);
-    OBSERVE("video-sync", MPV_FORMAT_STRING, m_videoSync, toString, videoSyncChanged);
-    OBSERVE("interpolation", MPV_FORMAT_FLAG, m_interpolation, toBool, interpolationChanged);
-    OBSERVE("tscale", MPV_FORMAT_STRING, m_tscale, toString, tscaleChanged);
-    OBSERVE("glsl-shaders", MPV_FORMAT_STRING, m_userShaders, toString, userShadersChanged);
-    OBSERVE("ytdl", MPV_FORMAT_FLAG, m_ytdl, toBool, ytdlChanged);
-    OBSERVE_DOUBLE("audio-delay", m_audioDelay, audioDelayChanged);
-    OBSERVE_DOUBLE("sub-delay", m_subDelay, subDelayChanged);
     add(QStringLiteral("track-list"), MPV_FORMAT_NODE, [this](const QVariant &value) { m_trackList = hyphenKeys(value.toList()); emit trackListChanged(); });
     add(QStringLiteral("playlist"), MPV_FORMAT_NODE, [this](const QVariant &value) { m_playlist = hyphenKeys(value.toList()); emit playlistChanged(); });
     add(QStringLiteral("chapter-list"), MPV_FORMAT_NODE, [this](const QVariant &value) {
@@ -347,32 +444,75 @@ void MpvPlayer::setupPropertyObservers() {
 #undef OBSERVE
 }
 
-quint64 MpvPlayer::propertyIntent(const QString &name, const QVariant &value) {
-    const quint64 revision = ++m_propertyRevisions[name];
-    if (coreAvailable()) {
-        m_pendingProperties.insert(name, value);
-        m_dirtyProperties.insert(name);
-    }
-    return revision;
+void MpvPlayer::observeOwnedProperty(const QString &name, const QVariant &value) {
+    if (!value.isValid()) return; // unavailable is not false, zero, or an explicit clear
+    auto &state = m_private->properties[name];
+    const QVariant observed = state.observed = state.fromNative(value);
+    if (state.desired.isValid() || !state.publish) return;
+    const auto publish = state.publish;
+    publish(observed);
+}
+
+void MpvPlayer::setOwnedProperty(const QString &name, const QVariant &value) {
+    auto &state = m_private->properties[name];
+    const QVariant desired = state.normalize(value);
+    if (state.current() == desired) return;
+    const auto revision = ++state.revision;
+    state.desired = desired;
+    state.queued = coreAvailable();
+    const auto publish = state.publish;
+    QPointer<MpvPlayer> alive(this);
+    publish(desired);
+    if (alive) flushProperty(name, revision);
 }
 
 void MpvPlayer::flushProperty(const QString &name, quint64 revision) {
-    if (m_propertyRevisions.value(name) != revision) return;
+    auto &state = m_private->properties[name];
+    if (state.revision != revision) return;
     if (!coreAvailable()) { failOperation(name, MPV_ERROR_UNINITIALIZED); return; }
-    if (!m_rendererInitialized || m_renderError < 0) return;
-    const QVariant value = m_pendingProperties.take(name);
-    m_dirtyProperties.remove(name);
-    submitProperty(name, value);
+    if (!m_rendererInitialized || m_renderError < 0 || !state.queued || state.writing) return;
+    state.queued = false;
+    state.writing = revision;
+    const int id = m_ctrl->setMpvPropertyAsync(name, state.toNative(state.desired));
+    if (id > 0) {
+        m_requests.insert(id, {1, false, name, revision});
+        return;
+    }
+    state.writing = 0;
+    QPointer<MpvPlayer> alive(this);
+    reconcileProperty(name, revision, {});
+    if (alive && !m_shuttingDown) failOperation(name, id);
 }
 
-#define SET_PROPERTY(Member, Signal, Name, Value) \
-    if (Member != val) { \
-        Member = val; \
-        const quint64 revision = propertyIntent(QStringLiteral(Name), Value); \
-        QPointer<MpvPlayer> alive(this); \
-        emit Signal(); \
-        if (alive) flushProperty(QStringLiteral(Name), revision); \
+void MpvPlayer::acknowledgeProperty(const QString &name, quint64 revision, int error) {
+    auto &state = m_private->properties[name];
+    if (state.writing != revision) return;
+    state.writing = 0;
+    if (state.revision != revision) {
+        flushProperty(name, state.revision);
+        return;
     }
+    if (!state.publish) {
+        if (error >= 0) state.observed = state.desired;
+        reconcileProperty(name, revision, {});
+        return;
+    }
+    // libmpv coalesces observations and does not guarantee notification for
+    // a write (including rejected writes). Read after the matching reply.
+    const int id = coreAvailable() ? m_ctrl->readMpvPropertyAsync(name) : MPV_ERROR_UNINITIALIZED;
+    if (id > 0) m_requests.insert(id, {2, false, name, revision});
+    else reconcileProperty(name, revision, {});
+}
+
+void MpvPlayer::reconcileProperty(const QString &name, quint64 revision, const QVariant &value) {
+    auto &state = m_private->properties[name];
+    if (state.revision != revision) return;
+    state.desired.clear();
+    if (value.isValid()) state.observed = state.fromNative(value);
+    const QVariant observed = state.observed;
+    const auto publish = state.publish;
+    if (publish) publish(observed);
+}
 
 void MpvPlayer::setSource(const QString &val) {
     if (m_source == val) return;
@@ -384,69 +524,36 @@ void MpvPlayer::setSource(const QString &val) {
     emit sourceChanged();
     if (alive && revision == m_mediaRevision && !m_shuttingDown) load(val);
 }
-void MpvPlayer::setPaused(bool val) { SET_PROPERTY(m_paused, pausedChanged, "pause", val ? QStringLiteral("yes") : QStringLiteral("no")) }
-void MpvPlayer::setPlaybackSpeed(double val) { val = qMax(0.01, val); SET_PROPERTY(m_playbackSpeed, playbackSpeedChanged, "speed", val) }
-void MpvPlayer::setMute(bool val) { SET_PROPERTY(m_mute, muteChanged, "mute", val ? QStringLiteral("yes") : QStringLiteral("no")) }
-void MpvPlayer::setVolume(double val) { val = qBound(0.0, val, 150.0); SET_PROPERTY(m_volume, volumeChanged, "volume", val) }
-void MpvPlayer::setScreenshotDirectory(const QString &value) { const QString val = cleanPath(value); SET_PROPERTY(m_screenshotDirectory, screenshotDirectoryChanged, "screenshot-directory", val) }
-void MpvPlayer::setLoopFile(const QVariant &val) { SET_PROPERTY(m_loopFile, loopFileChanged, "loop-file", val.toString()) }
-void MpvPlayer::setLoopPlaylist(const QVariant &val) { SET_PROPERTY(m_loopPlaylist, loopPlaylistChanged, "loop-playlist", val.toString()) }
-void MpvPlayer::setCurrentAudioDevice(const QString &val) { SET_PROPERTY(m_currentAudioDevice, currentAudioDeviceChanged, "audio-device", val) }
-void MpvPlayer::setHwdec(const QString &val) { SET_PROPERTY(m_hwdec, hwdecChanged, "hwdec", val) }
-void MpvPlayer::setVideoSync(const QString &val) { SET_PROPERTY(m_videoSync, videoSyncChanged, "video-sync", val) }
-void MpvPlayer::setInterpolation(bool val) { SET_PROPERTY(m_interpolation, interpolationChanged, "interpolation", val ? QStringLiteral("yes") : QStringLiteral("no")) }
-void MpvPlayer::setTscale(const QString &val) { SET_PROPERTY(m_tscale, tscaleChanged, "tscale", val) }
-void MpvPlayer::setUserShaders(const QString &val) { SET_PROPERTY(m_userShaders, userShadersChanged, "glsl-shaders", val) }
-void MpvPlayer::setYtdl(bool val) { SET_PROPERTY(m_ytdl, ytdlChanged, "ytdl", val ? QStringLiteral("yes") : QStringLiteral("no")) }
-void MpvPlayer::setAudioDelay(double val) { SET_PROPERTY(m_audioDelay, audioDelayChanged, "audio-delay", val) }
-void MpvPlayer::setSubDelay(double val) { SET_PROPERTY(m_subDelay, subDelayChanged, "sub-delay", val) }
-void MpvPlayer::setVideoZoom(double val) { SET_PROPERTY(m_videoZoom, videoZoomChanged, "video-zoom", val) }
-void MpvPlayer::setVideoPanX(double val) { SET_PROPERTY(m_videoPanX, videoPanXChanged, "video-pan-x", val) }
-void MpvPlayer::setVideoPanY(double val) { SET_PROPERTY(m_videoPanY, videoPanYChanged, "video-pan-y", val) }
-void MpvPlayer::setAudioPitchCorrection(bool val) { SET_PROPERTY(m_audioPitchCorrection, audioPitchCorrectionChanged, "audio-pitch-correction", val ? QStringLiteral("yes") : QStringLiteral("no")) }
-void MpvPlayer::setSubVisibility(bool val) { SET_PROPERTY(m_subVisibility, subVisibilityChanged, "sub-visibility", val ? QStringLiteral("yes") : QStringLiteral("no")) }
-void MpvPlayer::setBrightness(double val) { val = qBound(-100.0, val, 100.0); SET_PROPERTY(m_brightness, brightnessChanged, "brightness", val) }
-void MpvPlayer::setContrast(double val) { val = qBound(-100.0, val, 100.0); SET_PROPERTY(m_contrast, contrastChanged, "contrast", val) }
-#undef SET_PROPERTY
+#define SETTER(Member, Setter, Type, Native, ...) \
+    void MpvPlayer::set##Setter(Type value) { setOwnedProperty(QStringLiteral(Native), value); }
+OWNED_PROPERTIES(SETTER)
+#undef SETTER
+#undef OWNED_PROPERTIES
 
 void MpvPlayer::setFillMode(const QString &val) {
     if (m_fillMode == val) return;
     m_fillMode = val;
-    const quint64 aspect = propertyIntent(QStringLiteral("keepaspect"), val == QStringLiteral("stretch") ? QStringLiteral("no") : QStringLiteral("yes"));
-    const quint64 scan = propertyIntent(QStringLiteral("panscan"), val == QStringLiteral("preserveAspectCrop") ? 1.0 : 0.0);
+    auto defer = [this](const QString &name, const QVariant &desired) {
+        auto &state = m_private->properties[name];
+        state.desired = desired;
+        state.queued = coreAvailable();
+        return ++state.revision;
+    };
+    const quint64 aspect = defer(aspectName, val != QStringLiteral("stretch"));
+    const quint64 scan = defer(scanName, val == QStringLiteral("preserveAspectCrop") ? 1.0 : 0.0);
     QPointer<MpvPlayer> alive(this);
     emit fillModeChanged();
     if (!alive) return;
-    flushProperty(QStringLiteral("keepaspect"), aspect);
-    if (alive) flushProperty(QStringLiteral("panscan"), scan);
+    flushProperty(aspectName, aspect);
+    if (alive) flushProperty(scanName, scan);
 }
 
 void MpvPlayer::syncProperties() {
     if (!coreAvailable() || m_shuttingDown || m_renderError < 0) return;
-    const QSet<QString> dirty = std::exchange(m_dirtyProperties, {});
-    const QVariantMap pending = std::exchange(m_pendingProperties, {});
-    const auto revisions = m_propertyRevisions;
-    const QVariantMap defaults{
-        {"keepaspect", m_fillMode == "stretch" ? "no" : "yes"}, {"panscan", m_fillMode == "preserveAspectCrop" ? 1.0 : 0.0},
-        {"screenshot-directory", m_screenshotDirectory}, {"loop-file", m_loopFile.toString()}, {"loop-playlist", m_loopPlaylist.toString()},
-        {"video-zoom", m_videoZoom}, {"video-pan-x", m_videoPanX}, {"video-pan-y", m_videoPanY},
-        {"audio-pitch-correction", m_audioPitchCorrection ? "yes" : "no"}, {"sub-visibility", m_subVisibility ? "yes" : "no"},
-        {"brightness", m_brightness}, {"contrast", m_contrast}, {"speed", m_playbackSpeed}, {"mute", m_mute ? "yes" : "no"},
-        {"volume", m_volume}, {"audio-device", m_currentAudioDevice}, {"hwdec", m_hwdec}, {"video-sync", m_videoSync},
-        {"interpolation", m_interpolation ? "yes" : "no"}, {"tscale", m_tscale}, {"glsl-shaders", m_userShaders},
-        {"ytdl", m_ytdl ? "yes" : "no"}, {"audio-delay", m_audioDelay}, {"sub-delay", m_subDelay}, {"pause", m_paused ? "yes" : "no"}
-    };
-    // Keep the existing ordering: fill mode first and pause last, before loads.
-    QStringList order{"keepaspect", "panscan"};
-    for (auto it = defaults.cbegin(); it != defaults.cend(); ++it)
-        if (it.key() != "keepaspect" && it.key() != "panscan" && it.key() != "pause") order.append(it.key());
-    order.append(QStringLiteral("pause"));
+    const QStringList order = m_private->propertyOrder;
     QPointer<MpvPlayer> alive(this);
     for (const QString &name : order) {
-        if (!dirty.contains(name) || revisions.value(name) != m_propertyRevisions.value(name)) continue;
-        const QVariant value = pending.value(name, defaults.value(name));
-        if ((name == "screenshot-directory" || name == "glsl-shaders") && value.toString().isEmpty()) continue;
-        submitProperty(name, value);
+        flushProperty(name, m_private->properties[name].revision);
         if (!alive || m_shuttingDown || !coreAvailable()) return;
     }
     if (m_private->directoryActive && !m_private->directoryWatcher)
@@ -498,6 +605,13 @@ void MpvPlayer::complete(int id, int error, const QVariant &value, int kind) {
     m_requests.erase(found);
     const QVariant ownedValue = value;
     QPointer<MpvPlayer> alive(this);
+    if (owner.propertyRevision) {
+        if (kind == 2) {
+            reconcileProperty(owner.operation, owner.propertyRevision, error >= 0 ? ownedValue : QVariant());
+            return;
+        }
+        acknowledgeProperty(owner.operation, owner.propertyRevision, error);
+    }
     if (owner.caller) {
         if (kind == 0) emit asyncCommandFinished(id, error, ownedValue);
         else if (kind == 1) emit mpvPropertySetFinished(id, error);
@@ -738,8 +852,6 @@ void MpvPlayer::detach(bool notify) {
     m_coreAvailable = false;
     m_rendererInitialized = false;
     supersedeMedia();
-    m_dirtyProperties.clear();
-    m_pendingProperties.clear();
     disconnect(m_private->graphicsConnection);
     disconnect(m_private->bridge->dispatcher.get(), nullptr, this, nullptr);
     if (m_ctrl) disconnect(m_ctrl, nullptr, this, nullptr);

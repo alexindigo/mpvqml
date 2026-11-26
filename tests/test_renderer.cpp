@@ -248,6 +248,80 @@ private slots:
     QTRY_COMPARE_WITH_TIMEOUT(MpvCoreLease::outstandingReservations(), 0, 5000);
   }
 
+  void nativeOwnedPropertiesRoundTrip() {
+    TestWindow window;
+    window.resize(160, 120);
+    window.setPersistentSceneGraph(false);
+    window.setPersistentGraphics(false);
+    auto *player = new MpvPlayer(window.contentItem());
+    player->setSize(window.size());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QTRY_VERIFY(player->rendererReady());
+    QSignalSpy writes(player, &MpvPlayer::mpvPropertySetFinished);
+    QSignalSpy reads(player, &MpvPlayer::mpvPropertyReadFinished);
+    auto set = [&](const QString &name, const QVariant &value) {
+      writes.clear();
+      const int id = player->setMpvPropertyAsync(name, value);
+      QVERIFY(id > 0);
+      QTRY_COMPARE(writes.size(), 1);
+      QCOMPARE(writes.first().at(0).toInt(), id);
+      QCOMPARE(writes.first().at(1).toInt(), 0);
+    };
+    auto read = [&](const QString &name, QVariant &value) {
+      reads.clear();
+      const int id = player->readMpvPropertyAsync(name);
+      QVERIFY(id > 0);
+      QTRY_COMPARE(reads.size(), 1);
+      QCOMPARE(reads.first().at(0).toInt(), id);
+      QCOMPARE(reads.first().at(1).toInt(), 0);
+      value = reads.first().at(2);
+      qInfo() << name << value;
+    };
+    set("glsl-shaders", QStringLiteral("one.glsl:two.glsl"));
+    set("screenshot-directory", QDir::tempPath());
+    set("loop-file", QStringLiteral("inf"));
+    set("loop-playlist", 3);
+    set("video-zoom", 0.5);
+    set("video-pan-x", 0.25);
+    set("video-pan-y", -0.25);
+    set("brightness", 17);
+    set("contrast", -15);
+    set("audio-pitch-correction", false);
+    set("sub-visibility", false);
+    QVariant native;
+    for (const QString &name : {QStringLiteral("glsl-shaders"), QStringLiteral("screenshot-directory"), QStringLiteral("loop-file"), QStringLiteral("loop-playlist"), QStringLiteral("brightness")})
+      read(name, native);
+    QTRY_COMPARE(player->videoZoom(), 0.5);
+    QCOMPARE(player->videoPanX(), 0.25);
+    QCOMPARE(player->videoPanY(), -0.25);
+    QCOMPARE(player->brightness(), 17.0);
+    QCOMPARE(player->contrast(), -15.0);
+    QVERIFY(!player->audioPitchCorrection());
+    QVERIFY(!player->subVisibility());
+    QCOMPARE(player->loopFile().toString(), QStringLiteral("inf"));
+    QCOMPARE(player->loopPlaylist().toString(), QStringLiteral("3"));
+    QCOMPARE(player->userShaders(), QStringLiteral("one.glsl:two.glsl"));
+    QCOMPARE(player->screenshotDirectory(), QDir::tempPath());
+
+    window.hide();
+    window.releaseResources();
+    QTRY_VERIFY(!player->rendererReady());
+    player->setUserShaders({});
+    player->setScreenshotDirectory({});
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QTRY_VERIFY(player->rendererReady());
+    read("glsl-shaders", native);
+    QCOMPARE(native, QVariant(QVariantList()));
+    read("screenshot-directory", native);
+    QVERIFY(native.toString().isEmpty());
+    delete player;
+    window.hide();
+    window.releaseResources();
+    QTRY_COMPARE(MpvCoreLease::outstandingReservations(), 0);
+  }
+
   void actualVideoPixelsAndContextRecreation() {
     TestWindow window;
     window.setColor(Qt::black);

@@ -34,7 +34,7 @@ MpvPlayer {
 | `paused` | bool | Pause or resume playback. |
 | `position` | double | Current playback position in seconds. Read-only. |
 | `duration` | double | Total duration of the current media in seconds. Read-only. |
-| `playbackSpeed` | double | Playback speed multiplier (0.01 -- 100.0, default 1.0). |
+| `playbackSpeed` | double | Playback speed multiplier (default 1.0). The typed setter clamps the minimum to 0.01; libmpv validates the submitted value. |
 | `seeking` | bool | True while a seek operation is in progress. Read-only. |
 | `isBuffering` | bool | True while the player is buffering. Read-only. |
 
@@ -59,7 +59,7 @@ MpvPlayer {
 | `hasVideo` | bool | True if the current media has a video stream. Read-only. |
 | `brightness` | double | Brightness adjustment (-100.0 -- 100.0, default 0.0). |
 | `contrast` | double | Contrast adjustment (-100.0 -- 100.0, default 0.0). |
-| `videoZoom` | double | Video zoom factor (default 1.0). |
+| `videoZoom` | double | Logarithmic video zoom; 0 (default) is unchanged and 1 doubles the scale. |
 | `videoPanX` | double | Horizontal pan offset (default 0.0). |
 | `videoPanY` | double | Vertical pan offset (default 0.0). |
 
@@ -329,6 +329,15 @@ blocking read/command methods are removed; there is no raw `setProperty` API.
 Typed setters and convenience actions use the same queued interface. Their
 errors use `operationFailed(operation, code, message)` / `errorOccurred`, and
 their completions are not reported as caller `asyncCommandFinished` requests.
+Typed property getters show pending local intent until the matching write and
+read-back settle. Older observations cannot replace pending intent. A rejected
+write reconciles to the native value, or the last available observation (the
+initial value if nothing has been observed). An unavailable observation isn't a
+zero or a clear. Raw properties remain an escape hatch; recognized observations
+update the associated typed getters when no local write is pending. `fillMode`
+expresses intent for `keepaspect` and `panscan`, not an interpretation of raw state.
+Empty shader lists and screenshot directory strings are explicit clears, including
+when deferred until renderer readiness.
 Screenshot convenience submission is asynchronous; shutdown does not promise
 to cancel an already-running file write.
 

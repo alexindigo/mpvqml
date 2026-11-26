@@ -56,6 +56,16 @@ clear cancels only pending loads while preserving any playing entry. Unknown
 raw commands, aliases and script effects remain an escape hatch. Video selection
 uses native `vid`; it has no reload or facade seek continuation.
 
+One descriptor per owned property defines the native format, conversions,
+typed normalization, initial writes and renderer-ready order. Its state keeps
+the latest observation separate from the desired revision, queued intent and
+active native write. Typed writes to the same property serialize through the
+write reply; a matching read-back settles the current revision without relying
+on libmpv to send a change notification. A late read-back cannot settle a newer
+revision. Unavailable values do not overwrite the last available observation.
+Explicit clears stay valid values through renderer loss and readiness; an empty
+shader list is encoded as a native array, not a string containing one empty path.
+
 ## Async operations and event ownership
 
 Application work always passes through the interface. A positive int ID is local

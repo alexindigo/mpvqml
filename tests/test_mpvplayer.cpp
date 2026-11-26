@@ -914,53 +914,20 @@ private slots:
     QVERIFY(m_player->demuxerCacheState().isEmpty());
   }
 
-  // -- SyncProperties Dirty Tracking
+  // -- Property admission (mock readiness, not renderer proof)
 
-  void test_sync_properties_constructor_dirty_defaults() {
-    // Intentional deviations from mpv defaults are marked dirty in ctor
-    QVERIFY(m_player->m_dirtyProperties.contains("tscale"));
-    // Default fillMode "preserveAspectFit" is decomposed into the two real
-    // mpv properties it maps to.
-    QVERIFY(m_player->m_dirtyProperties.contains("keepaspect"));
-    QVERIFY(m_player->m_dirtyProperties.contains("panscan"));
-    QCOMPARE(m_player->m_pendingProperties.value("keepaspect").toString(),
-             QStringLiteral("yes"));
-    QCOMPARE(m_player->m_pendingProperties.value("panscan").toDouble(), 0.0);
-
-    // hwdec deviates from mpv's default ("no") and flows through the
-    // dirty/pending pipeline like every other setter.
-    QVERIFY(m_player->m_dirtyProperties.contains("hwdec"));
-    QCOMPARE(m_player->m_pendingProperties.value("hwdec").toString(),
-             QStringLiteral("auto"));
-    QCOMPARE(m_player->m_hwdec, QStringLiteral("auto"));
-
-    // mpv-matching defaults are NOT dirty
-    QVERIFY(!m_player->m_dirtyProperties.contains("volume"));
-    QVERIFY(!m_player->m_dirtyProperties.contains("speed"));
-    QVERIFY(!m_player->m_dirtyProperties.contains("mute"));
-  }
-
-  void test_sync_properties_only_dirty_are_synced() {
-    m_mockCtrl->reset();
-    m_player->m_dirtyProperties.clear();
-
-    // Set one property before init
+  void test_sync_properties_constructor_defaults_and_changed_values() {
+    m_player->setVolume(70.0);
     m_player->setVolume(75.0);
-    QVERIFY(m_player->m_dirtyProperties.contains("volume"));
-
-    // sync should only forward volume, not all properties
-    m_player->syncProperties();
-    QCOMPARE(m_mockCtrl->m_lastSetProperty, QStringLiteral("volume"));
-    QCOMPARE(m_mockCtrl->m_lastSetValue.toDouble(), 75.0);
-    QCOMPARE(m_mockCtrl->m_setPropertyCount, 1);
-    QVERIFY(m_player->m_dirtyProperties.isEmpty());
-  }
-
-  void test_sync_properties_clears_after_sync() {
-    m_player->m_dirtyProperties.clear();
-    m_player->m_dirtyProperties.insert("volume");
-    m_player->syncProperties();
-    QVERIFY(m_player->m_dirtyProperties.isEmpty());
+    QCOMPARE(m_mockCtrl->m_setPropertyCount, 0);
+    emit m_player->ready();
+    const QVariantMap expected{{"keepaspect", "yes"}, {"panscan", 0.0},
+                               {"hwdec", "auto"}, {"tscale", "mitchell"},
+                               {"volume", 75.0}};
+    QCOMPARE(m_mockCtrl->m_setValues, expected);
+    QCOMPARE(m_mockCtrl->m_setPropertyCount, 5);
+    emit m_player->ready();
+    QCOMPARE(m_mockCtrl->m_setPropertyCount, 5);
   }
 
   void test_sync_properties_each_property() {
@@ -970,11 +937,11 @@ private slots:
       QVariant expectedValue;
     };
 
+    emit m_player->ready();
+    QTRY_VERIFY(m_mockCtrl->m_readPropertyCount >= 2);
     auto check = [&](const SyncTestCase &tc) {
       m_mockCtrl->reset();
-      m_player->m_dirtyProperties.clear();
       tc.setter();
-      m_player->syncProperties();
       QCOMPARE(m_mockCtrl->m_lastSetProperty, tc.mpvProp);
       QCOMPARE(m_mockCtrl->m_lastSetValue, tc.expectedValue);
     };
@@ -1034,50 +1001,22 @@ private slots:
   }
 
   void test_sync_properties_fillMode() {
-    m_mockCtrl->reset();
-    m_player->m_dirtyProperties.clear();
-
     m_player->setFillMode("stretch");
-    m_player->syncProperties();
-
-    // fillMode syncs via applyFillMode which sets keepaspect + panscan
-    // panscan is the last call, so m_lastSetProperty should be "panscan"
-    QCOMPARE(m_mockCtrl->m_lastSetProperty, QStringLiteral("panscan"));
-    QCOMPARE(m_mockCtrl->m_lastSetValue.toDouble(), 0.0);
+    emit m_player->ready();
+    QCOMPARE(m_mockCtrl->m_submissions.at(0), (QVariantList{"set", "keepaspect", "no"}));
+    QCOMPARE(m_mockCtrl->m_submissions.at(1), (QVariantList{"set", "panscan", 0.0}));
   }
 
   void test_sync_properties_user_shaders_non_empty() {
-    m_mockCtrl->reset();
-    m_player->m_dirtyProperties.clear();
-
-    m_player->m_userShaders = QStringLiteral("my_shader.glsl");
-    m_player->m_dirtyProperties.insert("glsl-shaders");
-    m_player->syncProperties();
-    QCOMPARE(m_mockCtrl->m_lastSetProperty, QStringLiteral("glsl-shaders"));
-    QCOMPARE(m_mockCtrl->m_lastSetValue.toString(),
+    m_player->setUserShaders(QStringLiteral("my_shader.glsl"));
+    emit m_player->ready();
+    QCOMPARE(m_mockCtrl->m_setValues.value("glsl-shaders").toString(),
              QStringLiteral("my_shader.glsl"));
-    QVERIFY(m_player->m_dirtyProperties.isEmpty());
   }
 
-  void test_sync_properties_user_shaders_empty_skipped() {
-    m_mockCtrl->reset();
-    m_player->m_dirtyProperties.clear();
-
-    // userShaders is empty by default, mark it dirty but verify it's skipped
-    m_player->m_dirtyProperties.insert("glsl-shaders");
-    m_player->m_userShaders = QString();
-    m_player->syncProperties();
-    // The empty guard means setProperty is NOT called for glsl-shaders
-    QCOMPARE(m_mockCtrl->m_setPropertyCount, 0);
-    QVERIFY(m_player->m_dirtyProperties.isEmpty());
-  }
-
-  void test_sync_properties_nothing_dirty() {
-    m_mockCtrl->reset();
-    m_player->m_dirtyProperties.clear();
-    m_player->syncProperties();
-    QCOMPARE(m_mockCtrl->m_setPropertyCount, 0);
-    QVERIFY(m_player->m_dirtyProperties.isEmpty());
+  void test_sync_properties_does_not_write_unset_shaders() {
+    emit m_player->ready();
+    QVERIFY(!m_mockCtrl->m_setValues.contains("glsl-shaders"));
   }
 
   void test_mpv_log_client_setup_teardown() {
@@ -1267,17 +1206,6 @@ private slots:
 
   // -- Tier D regression tests
 
-  void test_ready_signal_triggers_syncProperties() {
-    QVERIFY(!m_player->m_rendererInitialized);
-
-    // Emit MpvAbstractItem::ready() to simulate render context up
-    emit m_player->ready();
-
-    QVERIFY(m_player->m_rendererInitialized);
-    // syncProperties consumed the constructor-seeded dirty set
-    QVERIFY(m_player->m_dirtyProperties.isEmpty());
-  }
-
   void test_ready_signal_flushes_deferred_load() {
     // load() before init queues a deferred action
     m_player->load(QStringLiteral("/tmp/deferred.mp4"));
@@ -1303,51 +1231,18 @@ private slots:
   }
 
   void test_hwdec_flows_via_syncProperties_not_eagerly() {
-    // Fresh player: mock should NOT have received hwdec yet
+    m_player->setHwdec(QStringLiteral("vaapi"));
     QCOMPARE(m_mockCtrl->m_setPropertyCount, 0);
-    QVERIFY(m_player->m_dirtyProperties.contains("hwdec"));
-
-    m_player->syncProperties();
-    // After sync, hwdec must have been pushed to the controller
-    bool sawHwdec = false;
-    // m_lastSetProperty is only the last; we count via multiple calls
-    // by checking the pending was consumed:
-    QVERIFY(!m_player->m_dirtyProperties.contains("hwdec"));
-    QVERIFY(m_mockCtrl->m_setPropertyCount >= 1);
-    // Not strictly required to be last; but we can also verify by
-    // resetting and syncing just hwdec:
-    m_mockCtrl->reset();
-    m_player->m_dirtyProperties.clear();
-    m_player->m_dirtyProperties.insert(QStringLiteral("hwdec"));
-    m_player->m_pendingProperties[QStringLiteral("hwdec")] =
-        QStringLiteral("vaapi");
-    m_player->syncProperties();
-    QCOMPARE(m_mockCtrl->m_lastSetProperty, QStringLiteral("hwdec"));
-    QCOMPARE(m_mockCtrl->m_lastSetValue.toString(),
-             QStringLiteral("vaapi"));
-    sawHwdec = true;
-    QVERIFY(sawHwdec);
+    emit m_player->ready();
+    QCOMPARE(m_mockCtrl->m_setValues.value("hwdec").toString(), QStringLiteral("vaapi"));
   }
 
   void test_fillMode_sets_real_mpv_props_after_sync() {
-    m_mockCtrl->reset();
-    m_player->m_dirtyProperties.clear();
-    m_player->m_pendingProperties.clear();
-
-    // Set to preserveAspectCrop => panscan 1.0, keepaspect yes
     m_player->setFillMode(QStringLiteral("preserveAspectCrop"));
-    QVERIFY(m_player->m_dirtyProperties.contains("keepaspect"));
-    QVERIFY(m_player->m_dirtyProperties.contains("panscan"));
-    // No synthetic "fillMode" key should leak into pending
-    QVERIFY(!m_player->m_pendingProperties.contains("fillMode"));
-    QCOMPARE(m_player->m_pendingProperties.value("panscan").toDouble(), 1.0);
-
-    m_player->syncProperties();
-    // keepaspect + panscan both pushed
-    QCOMPARE(m_mockCtrl->m_setPropertyCount, 2);
-    // panscan is applied second; last-set reflects it
-    QCOMPARE(m_mockCtrl->m_lastSetProperty, QStringLiteral("panscan"));
-    QCOMPARE(m_mockCtrl->m_lastSetValue.toDouble(), 1.0);
+    emit m_player->ready();
+    QCOMPARE(m_mockCtrl->m_submissions.at(0), (QVariantList{"set", "keepaspect", "yes"}));
+    QCOMPARE(m_mockCtrl->m_submissions.at(1), (QVariantList{"set", "panscan", 1.0}));
+    QVERIFY(!m_mockCtrl->m_setValues.contains("fillMode"));
   }
 
   void test_volume_observer_ignores_subepsilon_drift() {

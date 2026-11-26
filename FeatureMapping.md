@@ -41,6 +41,10 @@ Convenience media/screenshot and typed-property operations use the same seam
 and own their completions. Only explicit caller requests publish the matching
 command/read/set completion signals. All reads, including diagnostics, can be
 mocked without constructing a native core or worker.
+Typed properties project observed or pending values without blocking. Their
+internal read-backs reconcile accepted/rejected writes without any additional
+caller completion signals. Real libmpv tests cover raw round-trips and explicit
+clears across renderer recreation.
 
 ## Rendering/lifecycle details
 

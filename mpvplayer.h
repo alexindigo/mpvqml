@@ -261,8 +261,11 @@ private:
     void syncProperties();
     void emitError(int code, const QString &message);
     void failOperation(const QString &operation, int error);
-    quint64 propertyIntent(const QString &name, const QVariant &value);
+    void setOwnedProperty(const QString &name, const QVariant &value);
+    void observeOwnedProperty(const QString &name, const QVariant &value);
     void flushProperty(const QString &name, quint64 revision);
+    void acknowledgeProperty(const QString &name, quint64 revision, int error);
+    void reconcileProperty(const QString &name, quint64 revision, const QVariant &value);
     void enqueueMedia(const QString &operation, const QString &stateKey, std::function<void()> action);
     void drainMedia();
     void supersedeMedia(bool loadsOnly = false);
@@ -316,9 +319,6 @@ private:
     quint64 m_errorRevision = 0;
     struct DeferredInitAction { QString stateKey; std::function<void()> retry; };
     QVector<DeferredInitAction> m_deferredInitActions;
-    QSet<QString> m_dirtyProperties;
-    QVariantMap m_pendingProperties;
-    QHash<QString, quint64> m_propertyRevisions;
-    struct RequestOwner { int kind; bool caller; QString operation; };
+    struct RequestOwner { int kind; bool caller; QString operation; quint64 propertyRevision = 0; };
     QHash<int, RequestOwner> m_requests;
 };
