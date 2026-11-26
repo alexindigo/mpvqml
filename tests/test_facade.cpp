@@ -368,11 +368,20 @@ private slots:
         QCOMPARE(mock.m_commandCount, 0);
     }
 
-    void readOnlyPathWriteKeepsDeferredLoad() {
+    void nonReplacingPropertyWriteKeepsDeferredLoad_data() {
+        QTest::addColumn<QString>("property");
+        QTest::addColumn<QVariant>("value");
+        QTest::newRow("read-only-path") << QStringLiteral("path") << QVariant("ignored.mp4");
+        QTest::newRow("playlist-cursor") << QStringLiteral("playlist-current-pos") << QVariant(-1);
+    }
+
+    void nonReplacingPropertyWriteKeepsDeferredLoad() {
+        QFETCH(QString, property);
+        QFETCH(QVariant, value);
         MockMpvController mock;
         MpvPlayer player(nullptr, &mock);
         player.load("old.mp4");
-        QVERIFY(player.setMpvPropertyAsync("path", "ignored.mp4") > 0);
+        QVERIFY(player.setMpvPropertyAsync(property, value) > 0);
         mock.reset();
         emit player.ready();
         QCOMPARE(mock.m_lastCommand, QStringList({"loadfile", "old.mp4", "replace"}));

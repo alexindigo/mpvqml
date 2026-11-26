@@ -7,7 +7,8 @@ namespace MpvQmlPrivate {
 enum class MediaEffect { None, Replace, ReplaceIfIdle, ClearPendingLoads, Seek, Pause };
 
 inline MediaEffect propertyMediaEffect(const QString &name) {
-    if (name == "playlist-pos" || name == "playlist-pos-1" || name == "playlist-current-pos")
+    // playlist-current-pos changes only the cursor, not active playback.
+    if (name == "playlist-pos" || name == "playlist-pos-1")
         return MediaEffect::Replace;
     if (name == "time-pos" || name == "time-pos/full" || name == "percent-pos")
         return MediaEffect::Seek;
