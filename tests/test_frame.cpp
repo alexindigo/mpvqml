@@ -10,6 +10,7 @@
 #include <QtTest>
 #include <clocale>
 #include <memory>
+#include <unistd.h>
 
 class FrameTest : public QObject {
   Q_OBJECT
@@ -141,8 +142,98 @@ private slots:
     QTRY_COMPARE_WITH_TIMEOUT(replies.size(), 1, 8000);
     auto reply = replies.takeFirst();
     QCOMPARE(reply[0].toInt(), id);
-    QVERIFY(!reply[1].toString().isEmpty());
+    QCOMPARE(reply[1].toString(), QString("no-frame"));
     QVERIFY(!QFile::exists(output.toLocalFile()));
+  }
+
+  void detailedFailures_data() {
+    QTest::addColumn<QString>("kind");
+    for (const char *kind : {"missing input", "directory input", "malformed video", "audio only", "missing staging directory"})
+      QTest::newRow(kind) << QString::fromLatin1(kind);
+  }
+
+  void detailedFailures() {
+    QFETCH(QString, kind);
+    QUrl input = asset("test_frame_seek.webm");
+    QUrl output = target("should-not-exist.png");
+    QString code, stage;
+    if (kind == "missing input" || kind == "directory input") {
+      input = kind == "missing input" ? target("missing.webm") : QUrl::fromLocalFile(scratch.path());
+      code = "unreadable";
+      stage = "open-input";
+    } else if (kind == "missing staging directory") {
+      output = target("missing-parent/frame.png");
+      code = "write-failed";
+      stage = "publish";
+    } else {
+      if (kind == "audio only") {
+        input = asset("test_audio1.mp3");
+      } else {
+        input = target("malformed.webm");
+        QFile file(input.toLocalFile());
+        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::NewOnly));
+        QCOMPARE(file.write("not a video"), 11);
+      }
+      code = "no-frame";
+      stage = "initial-frame";
+    }
+    QSignalSpy replies(capture.get(), SIGNAL(finished(int,QString,QString)));
+    QSignalSpy details(capture.get(), SIGNAL(finishedDetailed(int,QVariantMap)));
+    QVERIFY(details.isValid());
+    const int id = start(input, 0, output);
+    QVERIFY(id > 0);
+    QTRY_COMPARE_WITH_TIMEOUT(details.size(), 1, 8000);
+    QCOMPARE(replies.size(), 1);
+    QCOMPARE(details[0][0].toInt(), id);
+    auto detail = details[0][1].toMap();
+    QCOMPARE(detail["stage"].toString(), stage);
+    QCOMPARE(detail["code"].toString(), code);
+    QCOMPARE(replies[0][1].toString(), code);
+    QCOMPARE(detail["reason"].toString(), replies[0][2].toString());
+    QCOMPARE(detail["mpvError"].toInt() < 0, code == "no-frame");
+    QCOMPARE(detail["systemError"].toInt() > 0, kind == "missing input" || kind == "missing staging directory");
+    QVERIFY(!QFile::exists(output.toLocalFile()));
+  }
+
+  void protectsExistingTargets_data() {
+    QTest::addColumn<QString>("kind");
+    for (const char *kind : {"collision", "parent alias", "target symlink", "hard link"})
+      QTest::newRow(kind) << QString::fromLatin1(kind);
+  }
+
+  void protectsExistingTargets() {
+    QFETCH(QString, kind);
+    QTemporaryDir dir(scratch.filePath("aliases-XXXXXX"));
+    QVERIFY(dir.isValid());
+    const QString copiedSource = dir.filePath("media.webm");
+    QVERIFY(QFile::copy(asset("test_frame_seek.webm").toLocalFile(), copiedSource));
+    QString path = dir.filePath("existing.png");
+    if (kind == "parent alias") {
+      QVERIFY(QFile::link(dir.path(), dir.filePath("self")));
+      path = dir.filePath("self/media.webm");
+    } else if (kind == "target symlink") {
+      QVERIFY(QFile::link(copiedSource, path));
+    } else if (kind == "hard link") {
+      QCOMPARE(::link(QFile::encodeName(copiedSource).constData(), QFile::encodeName(path).constData()), 0);
+    } else {
+      QFile sentinel(path);
+      QVERIFY(sentinel.open(QIODevice::WriteOnly));
+      QCOMPARE(sentinel.write("sentinel"), 8);
+    }
+    QFile original(path);
+    QVERIFY(original.open(QIODevice::ReadOnly));
+    const auto before = original.readAll();
+    original.close();
+    QSignalSpy replies(capture.get(), SIGNAL(finished(int,QString,QString)));
+    const auto id = start(QUrl::fromLocalFile(copiedSource), 0, QUrl::fromLocalFile(path));
+    QVERIFY(id > 0);
+    QTRY_COMPARE_WITH_TIMEOUT(replies.size(), 1, 8000);
+    QCOMPARE(replies[0][0].toInt(), id);
+    QCOMPARE(replies[0][1].toString(), QString("write-failed"));
+    QVERIFY(original.open(QIODevice::ReadOnly));
+    QCOMPARE(original.readAll(), before);
+    if (kind == "target symlink")
+      QCOMPARE(QFile::symLinkTarget(path), copiedSource);
   }
 
   void cancelThenCapture() {
@@ -151,7 +242,9 @@ private slots:
     QSignalSpy replies(capture.get(), SIGNAL(finished(int,QString,QString)));
     int id = start(input, 0.75, output);
     QVERIFY(id > 0);
-    QVERIFY(QMetaObject::invokeMethod(capture.get(), "cancel", Q_ARG(int, id)));
+    bool cancelled = false;
+    QVERIFY(QMetaObject::invokeMethod(capture.get(), "cancel", Q_RETURN_ARG(bool, cancelled), Q_ARG(int, id)));
+    QVERIFY(cancelled);
     QVERIFY(replies.isEmpty());
     int next = start(input, 0, target("after.png"));
     QVERIFY(next > id);

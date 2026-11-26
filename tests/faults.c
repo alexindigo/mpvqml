@@ -242,15 +242,82 @@ mpv_handle *mpv_create_client(mpv_handle *core, const char *name)
     return client;
 }
 
+/* One capture per event-sequence child. Delaying real submission proves the
+ * inserted restart cannot possibly represent the new frame. */
+static _Thread_local char seek_position[64];
+static _Thread_local uint64_t seek_token;
+static _Thread_local int fake_events;
+
+int mpv_command_async(mpv_handle *handle, uint64_t token, const char **args)
+{
+    int (*real_command)(mpv_handle *, uint64_t, const char **) = required_symbol("mpv_command_async");
+    if ((atomic_load(&flags) & FaultCaptureEvents) && strcmp(args[0], "seek") == 0) {
+        if (strlen(args[1]) >= sizeof(seek_position) || strcmp(args[2], "absolute+exact"))
+            _exit(93);
+        strcpy(seek_position, args[1]);
+        seek_token = token;
+        fake_events = 2;
+        return 0;
+    }
+    return real_command(handle, token, args);
+}
+
 mpv_event *mpv_wait_event(mpv_handle *handle, double timeout)
 {
     mpv_event *(*real_wait)(mpv_handle *, double) = required_symbol("mpv_wait_event");
+    if (seek_token) {
+        static _Thread_local mpv_event stale;
+        if (fake_events == 2) {
+            --fake_events;
+            stale = (mpv_event){.event_id = MPV_EVENT_PLAYBACK_RESTART};
+            return &stale;
+        }
+        if (fake_events == 1) {
+            --fake_events;
+            stale = (mpv_event){.event_id = MPV_EVENT_COMMAND_REPLY, .error = MPV_ERROR_COMMAND,
+                                .reply_userdata = UINT64_MAX};
+            return &stale;
+        }
+        const char *command[] = {"seek", seek_position, "absolute+exact", NULL};
+        int (*real_command)(mpv_handle *, uint64_t, const char **) = required_symbol("mpv_command_async");
+        if (real_command(handle, seek_token, command) < 0)
+            _exit(94);
+        seek_token = 0;
+        atomic_fetch_add(&counters[FaultCaptureSeekSubmitted], 1);
+    }
     mpv_event *event = real_wait(handle, timeout);
+    if ((atomic_load(&flags) & FaultCaptureEvents)
+        && (event->event_id == MPV_EVENT_COMMAND_REPLY || event->event_id == MPV_EVENT_FILE_LOADED
+            || event->event_id == MPV_EVENT_SEEK || event->event_id == MPV_EVENT_PLAYBACK_RESTART))
+        fprintf(stderr, "CAPTURE_NATIVE_EVENT %s token=%llu error=%d\n",
+                mpv_event_name(event->event_id), (unsigned long long)event->reply_userdata, event->error);
     if ((atomic_load(&flags) & FaultSynchronousWakeup)
         && (uintptr_t)handle == atomic_load(&latest_helper_handle)
         && event && event->event_id == MPV_EVENT_NONE)
         atomic_fetch_add(&counters[FaultHelperEmptyDrains], 1);
     return event;
+}
+
+int mpv_render_context_render(mpv_render_context *context, mpv_render_param *parameters)
+{
+    int (*real_render)(mpv_render_context *, mpv_render_param *) = required_symbol("mpv_render_context_render");
+    if (atomic_load(&flags) & FaultCaptureBeforePublish) {
+        for (mpv_render_param *p = parameters; p->type; ++p) {
+            if (p->type == MPV_RENDER_PARAM_SW_POINTER) {
+                await_release(FaultCaptureRenderEntered, -1);
+                break;
+            }
+        }
+    }
+    return real_render(context, parameters);
+}
+
+int linkat(int olddir, const char *oldpath, int newdir, const char *newpath, int options)
+{
+    int (*real_link)(int, const char *, int, const char *, int) = required_symbol("linkat");
+    if ((atomic_load(&flags) & FaultCapturePublish) && strcmp(newpath, "publish.png") == 0)
+        await_release(FaultCapturePublishEntered, -1);
+    return real_link(olddir, oldpath, newdir, newpath, options);
 }
 
 void mpv_terminate_destroy(mpv_handle *handle)

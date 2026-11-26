@@ -75,6 +75,11 @@ private slots:
     if (fixtureName == "coreInitializationFailure") flags = FaultInitialize;
     if (fixtureName == "captureInitializationFailure") flags = FaultInitialize;
     if (fixtureName == "captureSuccessReusesReleasedSlot") flags = FaultRetirementBarrier;
+    if (fixtureName == "captureIgnoresUncorrelatedEvents") flags = FaultCaptureEvents;
+    if (fixtureName == "captureCancellationWins" || fixtureName == "captureExpiresBeforeEncoding")
+      flags = FaultCaptureBeforePublish;
+    if (fixtureName == "capturePublicationWins" || fixtureName == "captureCompetingWriter"
+        || fixtureName == "capturePublishesPastDeadline") flags = FaultCapturePublish;
     if (fixtureName == "partialRetirementBootstrapFailure") failThread = 2;
     if (fixtureName == "workerStartupFailure") failThread = 3;
     if (fixtureName == "bothWorkersBlockedAndAllLiveLeasesReclaimed"
@@ -211,6 +216,128 @@ private slots:
     QVERIFY(other.capacityAvailable());
     QVERIFY(!QFile::exists(a.toLocalFile()) && !QFile::exists(b.toLocalFile()));
     exercised();
+  }
+
+  void captureIgnoresUncorrelatedEvents() {
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    const auto path = temp.filePath("seek.png");
+    MpvFrameCapture capture;
+    QSignalSpy replies(&capture, &MpvFrameCapture::finished);
+    QVERIFY(capture.capture(QUrl::fromLocalFile(MPVQML_CRASH_SEEK_VIDEO), 0.75, 123, 88,
+                           QUrl::fromLocalFile(path)) > 0);
+    QTRY_COMPARE_WITH_TIMEOUT(replies.size(), 1, 8000);
+    QCOMPARE(replies[0][1].toString(), QString());
+    const QImage image(path);
+    QCOMPARE(image.size(), QSize(123, 69));
+    const auto color = image.pixelColor(61, 34);
+    QVERIFY2(color.red() < 30 && color.blue() > 210, qPrintable(color.name()));
+    QCOMPARE(faults.counter(FaultCaptureSeekSubmitted), 1);
+    qInfo() << "FAULT_CASE_EXERCISED captureIgnoresUncorrelatedEvents";
+  }
+
+  void captureRaces(bool cancelWins, bool competitor) {
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    const auto path = temp.filePath("publish.png");
+    MpvFrameCapture capture;
+    QSignalSpy replies(&capture, &MpvFrameCapture::finished);
+    QSignalSpy releases(&capture, &MpvFrameCapture::capacityReleased);
+    const auto id = capture.capture(QUrl::fromLocalFile(MPVQML_CRASH_SEEK_VIDEO), 0, 123, 88,
+                                    QUrl::fromLocalFile(path));
+    QVERIFY(id > 0);
+    struct Release { ~Release() { faults.release(); } } release;
+    QTRY_COMPARE_WITH_TIMEOUT(faults.counter(cancelWins ? FaultCaptureRenderEntered : FaultCapturePublishEntered), 1, 5000);
+    QVERIFY(!QFile::exists(path));
+    QCOMPARE(capture.cancel(id), cancelWins);
+    if (cancelWins) {
+      QTRY_COMPARE(replies.size(), 1);
+      QVERIFY(releases.isEmpty());
+    }
+    if (competitor) {
+      QFile sentinel(path);
+      QVERIFY(sentinel.open(QIODevice::WriteOnly | QIODevice::NewOnly));
+      QCOMPARE(sentinel.write("other writer"), 12);
+    }
+    faults.release();
+    QTRY_COMPARE_WITH_TIMEOUT(releases.size(), 1, 8000);
+    QCOMPARE(replies.size(), 1);
+    QCOMPARE(replies[0][0].toInt(), id);
+    QCOMPARE(replies[0][1].toString(), cancelWins ? "cancelled" : competitor ? "write-failed" : "");
+    QCOMPARE(MpvCoreLease::outstandingReservations(), 0);
+    if (cancelWins) {
+      QVERIFY(!QFile::exists(path));
+    } else if (competitor) {
+      QFile sentinel(path);
+      QVERIFY(sentinel.open(QIODevice::ReadOnly));
+      QCOMPARE(sentinel.readAll(), QByteArray("other writer"));
+    } else {
+      const QImage image(path);
+      QCOMPARE(image.size(), QSize(123, 69));
+      QVERIFY(image.pixelColor(61, 34).red() > 210);
+    }
+    QCOMPARE(QDir(temp.path()).entryList(QDir::Files | QDir::Hidden).size(), cancelWins ? 0 : 1);
+    qInfo().noquote() << "FAULT_CASE_EXERCISED" << fixtureName;
+  }
+
+  void captureCancellationWins() { captureRaces(true, false); }
+  void capturePublicationWins() { captureRaces(false, false); }
+  void captureCompetingWriter() { captureRaces(false, true); }
+
+  void captureDeadline(bool publishStarted) {
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    const auto path = temp.filePath("publish.png");
+    MpvFrameCapture capture;
+    QSignalSpy details(&capture, &MpvFrameCapture::finishedDetailed);
+    QSignalSpy releases(&capture, &MpvFrameCapture::capacityReleased);
+    QVERIFY(capture.capture(QUrl::fromLocalFile(MPVQML_CRASH_SEEK_VIDEO), 0, 123, 88,
+                           QUrl::fromLocalFile(path)) > 0);
+    struct Release { ~Release() { faults.release(); } } release;
+    QTRY_COMPARE_WITH_TIMEOUT(faults.counter(publishStarted ? FaultCapturePublishEntered : FaultCaptureRenderEntered), 1, 5000);
+    // Hold until the whole admission budget has elapsed, not to win a race.
+    QTest::qWait(7100);
+    QVERIFY(releases.isEmpty());
+    faults.release();
+    QTRY_COMPARE_WITH_TIMEOUT(releases.size(), 1, 5000);
+    QCOMPARE(details.size(), 1);
+    const auto outcome = details[0][1].toMap();
+    QCOMPARE(outcome["stage"].toString(), publishStarted ? "complete" : "encode");
+    QCOMPARE(outcome["code"].toString(), publishStarted ? "" : "timeout");
+    QCOMPARE(QFile::exists(path), publishStarted);
+    QCOMPARE(QDir(temp.path()).entryList(QDir::Files | QDir::Hidden).size(), publishStarted ? 1 : 0);
+    qInfo().noquote() << "FAULT_CASE_EXERCISED" << fixtureName;
+  }
+
+  void captureExpiresBeforeEncoding() { captureDeadline(false); }
+  void capturePublishesPastDeadline() { captureDeadline(true); }
+
+  void captureCancellationBeforeRetiredDelivery() {
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    MpvFrameCapture capture;
+    struct CancelAtDelivery : QObject {
+      MpvFrameCapture &owner;
+      int id = 0;
+      bool cancelled = false;
+      explicit CancelAtDelivery(MpvFrameCapture &capture) : owner(capture) {}
+      bool eventFilter(QObject *, QEvent *event) override {
+        if (event->type() == QEvent::MetaCall && id > 0)
+          cancelled = owner.cancel(std::exchange(id, 0));
+        return false;
+      }
+    } filter(capture);
+    capture.installEventFilter(&filter);
+    QStringList order;
+    connect(&capture, &MpvFrameCapture::finished, this, [&](int, const QString &code) { order.append(code); });
+    connect(&capture, &MpvFrameCapture::capacityReleased, this, [&](int) { order.append("released"); });
+    filter.id = capture.capture(QUrl::fromLocalFile(temp.filePath("missing-video")), 0, 123, 88,
+                                QUrl::fromLocalFile(temp.filePath("frame.png")));
+    QVERIFY(filter.id > 0);
+    QTRY_COMPARE_WITH_TIMEOUT(order.size(), 2, 5000);
+    QVERIFY(filter.cancelled);
+    QCOMPARE(order, QStringList({"cancelled", "released"}));
+    qInfo() << "FAULT_CASE_EXERCISED captureCancellationBeforeRetiredDelivery";
   }
 
   void captureSuccessReusesReleasedSlot() {
@@ -774,6 +901,10 @@ private slots:
     QTest::addColumn<QString>("name");
     for (const char *name : {"coreCreationFailure", "coreInitializationFailure", "captureInitializationFailure",
                             "mixedAdmissionHoldsCancelledSlots", "captureSuccessReusesReleasedSlot",
+                            "captureIgnoresUncorrelatedEvents", "captureCancellationWins",
+                            "capturePublicationWins", "captureCompetingWriter",
+                            "captureCancellationBeforeRetiredDelivery",
+                            "captureExpiresBeforeEncoding", "capturePublishesPastDeadline",
                             "partialRetirementBootstrapFailure", "workerStartupFailure",
                             "bothWorkersBlockedAndAllLiveLeasesReclaimed", "workerTlsCleanupOutlivesFacade",
                             "moduleUnloadWhileBlocked", "publicCoreCreationFailure",

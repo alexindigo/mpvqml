@@ -146,11 +146,23 @@ Job outcome (including early cancellation) is separate from native retirement.
 The worker frees the render context, terminates the core while the input
 descriptor is still live, closes the input and releases the shared slot. Guarded
 GUI delivery then frees the local slot before non-cancelled completion and
-capacity notification. Destruction does not join the worker. A cancelled job
-cannot cross the publication gate;
-the successful handoff is an atomically written caller-owned staged PNG.
-The guiless QML test instantiates the actual registered type and checks
-both exact-seek pixels and cancellation.
+capacity notification. Cancellation and retirement callbacks share one terminal
+delivery ledger, keeping cancellation before capacity regardless of which was
+queued first. Destruction does not join the worker.
+
+The private frame transaction requires a matching command reply and an
+ordered file-loaded/restart pair for initial readiness, or a seek/restart
+pair for requested-position readiness. Software frame handoff keeps the
+native VO progressing while events are pending. Terminal details are owned
+values, separate from native event storage. A 7-second cooperative budget
+checks work boundaries; it cannot preempt native or filesystem calls.
+
+The encoder writes a temporary PNG beside the target in a descriptor-held
+directory. Cancellation and publication compete at one gate. Publication
+atomically links the finished PNG into an unused caller-owned name without
+replacing aliases or competing writers, then retires the temporary name.
+The guiless suite observes real first/seek pixels through the registered QML
+type; isolated fault children hold native and publication boundaries.
 
 See `UPSTREAM.md` for pinned derivation/notices and `API.md` for the consumer
 contract. Existing suites plus controller, renderer, facade, helper, retirement,

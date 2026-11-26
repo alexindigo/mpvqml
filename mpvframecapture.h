@@ -30,15 +30,19 @@ public:
 
 signals:
   void finished(int id, const QString &code, const QString &reason);
+  void finishedDetailed(int id, const QVariantMap &detail);
   void capacityReleased(int id);
 
 private:
   struct Admission;
   struct Dispatch;
   struct Job;
+  struct Outcome;
   Admission admit(const QUrl &source, double fraction, int maxWidth, int maxHeight,
                   const QUrl &destination);
-  void retired(const std::shared_ptr<Job> &job, const QString &code, const QString &reason);
+  void retired(const std::shared_ptr<Job> &job, const Outcome &outcome);
+  void deliver(int id, const Outcome &outcome);
+  void deliverCancellation(const std::shared_ptr<Job> &job);
   std::shared_ptr<Dispatch> m_dispatch;
   QHash<int, std::shared_ptr<Job>> m_activeJobs;
   int m_lastId = 0;

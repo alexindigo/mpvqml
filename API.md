@@ -416,7 +416,10 @@ See `mpvError` values: `Success`, `EventQueueFull`, `NoMem`,
 
 `MpvFrameCapture` is a non-visual `MpvQml` type. It needs no Qt Quick
 window, graphics backend or playback item. Give it absolute `file:` URLs
-and a caller-owned private staging directory (which must already exist):
+and a caller-owned private staging directory (which must already exist).
+Publication never replaces an existing file, link, or competing writer's
+result. The staging filesystem must allow hard links within that directory.
+On Linux an accessible `/proc/<pid>/fd/<directory-fd>` may name the directory:
 
 ```qml
 import MpvQml
@@ -452,6 +455,14 @@ identifies the failed stage and `reason` is diagnostic text. Negative
 admission returns are libmpv error codes and get no signal. Two requests
 may run per instance, further subject to the shared native lease limit.
 
+`finishedDetailed(id, detail)` follows the legacy signal if the object still
+exists. It carries the same `code` and `reason`, the stage (`open-input`,
+`initialize-core`, `initialize-render`, `load-command`, `initial-frame`,
+`seek-command`, `seek-frame`, `render`, `encode`, `publish`, `complete`,
+or `cancelled`), and integer `mpvError` and `systemError` fields. These fields
+are zero when no corresponding libmpv error or system errno is available.
+Both signals describe the same terminal outcome, not two results.
+
 Alternatively, `tryCapture(source, fraction, maxWidth, maxHeight, destination)`
 submits the same job and returns `{ status, id, error, reason }`. Use one
 admission method per attempt. `status` is one of the `MpvFrameCapture` enum
@@ -484,9 +495,13 @@ already taken the slot.
 request was unknown, previously cancelled, or has begun atomic publication.
 Use unique destinations; a cancelled request retains its worker slot until
 native cleanup finishes. Destruction drops callbacks and cancels any job
-that has not begun publication without joining native work. The capture
-deadline bounds the event wait; a stalled filesystem or native call cannot
-be preempted in-process. A consumer may apply its own waiting deadline.
+that has not begun publication without joining native work. The 7-second
+deadline starts at admission and is checked at work boundaries, including
+before encoding and before entering publication. Once publication begins,
+the result reports whether it committed, not whether the deadline elapsed.
+The 4096-pixel output edges, 64-MiPixel decoder limit and native job limits
+bound different resources; none preempts stalled I/O or native calls or
+isolates decoder faults. A consumer may apply its own waiting deadline.
 
 ## Track and playlist data
 

@@ -9,7 +9,10 @@ enum MpvQmlFault {
   FaultRenderCreate = 16,
   FaultFileBarrier = 32,
   FaultSynchronousWakeup = 64,
-  FaultInitializeBarrier = 128
+  FaultInitializeBarrier = 128,
+  FaultCaptureEvents = 256,
+  FaultCaptureBeforePublish = 512,
+  FaultCapturePublish = 1024
 };
 
 enum MpvQmlFaultCounter {
@@ -36,6 +39,9 @@ enum MpvQmlFaultCounter {
   FaultHelperAddressReuses,
   FaultHelperEmptyDrains,
   FaultInitializeEntered,
+  FaultCaptureSeekSubmitted,
+  FaultCapturePublishEntered,
+  FaultCaptureRenderEntered,
   FaultCounterCount
 };
 

@@ -16,7 +16,7 @@ MpvQt classes are not part of the public API or runtime dependency graph.
 | Generic commands/results | `commandAsync(params)` / `asyncCommandFinished(id, error, result)` | `mpv_command_node_async`, immediate input cleanup, owned native result copies |
 | Configuration files | `loadConfigFile(path)` | Worker-affine native loading; operation failures reported to the facade |
 | Screenshots | `screenshot(mode)` or explicit caller screenshot command | Async submission; final core/file I/O retires off GUI/render threads |
-| One-shot local video frame | `MpvFrameCapture.capture` / `tryCapture` / `cancel` / `finished` | Separate worker-owned software render context, shared native admission, bounded staged PNG |
+| One-shot local video frame | `MpvFrameCapture.capture` / `tryCapture` / `cancel` / `finished` / `finishedDetailed` | Worker-owned load/seek and software-frame transaction, shared native admission, bounded no-clobber staged PNG |
 | Capture backpressure | `capacityReleased(id)` / `capacityAvailable()` | Local slot release follows native cleanup and shared slot release; cancellation can settle earlier |
 | Logs | `setLogLevel` / `logMessage` | Separate helper client, barrier-safe immutable wakeup registration |
 | Hooks | `hookAdd`, `hookContinue`, `hookTriggered` | Separate helper client; hooks must be continued during ordinary operation |

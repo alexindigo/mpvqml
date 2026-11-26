@@ -172,7 +172,8 @@ if(BUILD_TEST_MODE)
   target_link_libraries(mpvqml_crash_tests PRIVATE mpvqml Qt6::Core Qt6::Test ${MPV_LIBRARIES} ${CMAKE_DL_LIBS})
   target_compile_definitions(mpvqml_crash_tests PRIVATE MPVQML_FAULT_LIBRARY="$<TARGET_FILE:mpvqml_test_faults>")
   target_compile_definitions(mpvqml_crash_tests PRIVATE
-      MPVQML_CRASH_VIDEO="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/test_one_video.mp4")
+      MPVQML_CRASH_VIDEO="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/test_one_video.mp4"
+      MPVQML_CRASH_SEEK_VIDEO="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/test_frame_seek.webm")
   add_library(mpvqml_test_unload_consumer SHARED tests/unload-consumer.cpp)
   set_target_properties(mpvqml_test_unload_consumer PROPERTIES AUTOMOC OFF)
   target_compile_options(mpvqml_test_unload_consumer PRIVATE -fno-gnu-unique)
