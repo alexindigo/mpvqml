@@ -17,6 +17,26 @@ class TestHelpers : public QObject {
 private slots:
     void cleanup() { QTRY_COMPARE_WITH_TIMEOUT(MpvCoreLease::outstandingReservations(), 0, 5000); }
 
+    void busyLogDrainYieldsToQueuedGuiWork() {
+        MpvBackendWorker worker;
+        QVERIFY(worker.initialize().success);
+        auto *core = worker.core()->handle();
+        MpvLogClient log;
+        log.setupLogClient(core);
+        QCOMPARE(log.setLogLevel("info"), 0);
+        int received = 0;
+        int atYield = 0;
+        connect(&log, &MpvLogClient::logMessage, this, [&](const QString &, const QString &, const QString &text) {
+            if (!text.contains("mpvqml-burst")) return;
+            if (++received == 1)
+                QMetaObject::invokeMethod(&log, [&]() { atYield = received; }, Qt::QueuedConnection);
+        });
+        constexpr int burst = 128;
+        for (int i = 0; i < burst; ++i) QCOMPARE(print(core, "mpvqml-burst"), 0);
+        QTRY_COMPARE(received, burst);
+        QVERIFY(atYield > 0 && atYield < burst);
+    }
+
     void disableReenableAndNestedDeliveryDrainsOnlyCurrentGeneration() {
         MpvBackendWorker worker;
         QVERIFY(worker.initialize().success);
@@ -106,6 +126,30 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(triggered && !alive, 5000);
         worker.shutdown();
         QTRY_COMPARE_WITH_TIMEOUT(MpvCoreLease::outstandingReservations(), 0, 5000);
+    }
+
+    void realHookContinuesThroughNestedDelivery() {
+        MpvPlayer player;
+        QSignalSpy writes(&player, &MpvPlayer::mpvPropertySetFinished);
+        QVERIFY(player.setMpvPropertyAsync("ao", "null") > 0);
+        QTRY_COMPARE(writes.size(), 1);
+        QCOMPARE(writes[0][1].toInt(), 0);
+        QSignalSpy loaded(&player, &MpvPlayer::fileLoaded);
+        QSignalSpy errors(&player, &MpvPlayer::operationFailed);
+        int triggered = 0;
+        connect(&player, &MpvPlayer::hookTriggered, this, [&](const QString &name, quint64 id) {
+            QCOMPARE(name, QStringLiteral("on_load"));
+            QVERIFY(id > 0);
+            ++triggered;
+            QCoreApplication::processEvents();
+            QCOMPARE(loaded.size(), 0);
+            player.hookContinue(id);
+        });
+        player.hookAdd("on_load");
+        QVERIFY(player.commandAsync({"loadfile", QStringLiteral(MPVQML_HELPER_AUDIO)}) > 0);
+        QTRY_COMPARE(loaded.size(), 1);
+        QCOMPARE(triggered, 1);
+        QCOMPARE(errors.size(), 0);
     }
 };
 

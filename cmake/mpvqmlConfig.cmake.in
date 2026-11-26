@@ -1,0 +1,14 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Qt6 6.5 COMPONENTS Core Gui Quick)
+find_dependency(PkgConfig)
+pkg_check_modules(MPVQML_MPV QUIET IMPORTED_TARGET mpv)
+if(NOT TARGET PkgConfig::MPVQML_MPV)
+    set(mpvqml_FOUND FALSE)
+    set(mpvqml_NOT_FOUND_MESSAGE "mpvqml public headers require the libmpv pkg-config module")
+    return()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/mpvqmlTargets.cmake")
+check_required_components(mpvqml)

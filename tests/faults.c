@@ -28,6 +28,12 @@ static char watched_path[4096];
 static _Atomic(FILE *) watched_stream;
 static atomic_uintptr_t last_destroyed_handle;
 static atomic_uintptr_t latest_helper_handle;
+static pthread_mutex_t render_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    mpv_render_context *context;
+    pthread_t thread;
+    int registered;
+} render_owners[32];
 
 int mpvqml_fault_watch_file(const char *path)
 {
@@ -40,9 +46,10 @@ int mpvqml_fault_watch_file(const char *path)
 }
 
 static const char *const mpv_symbols[] = {
-    "mpv_create", "mpv_initialize", "mpv_destroy", "mpv_terminate_destroy"
+    "mpv_create", "mpv_set_option_string", "mpv_initialize", "mpv_destroy", "mpv_terminate_destroy"
 };
-static void *bound_symbols[4];
+enum { MpvSymbolCount = sizeof(mpv_symbols) / sizeof(*mpv_symbols) };
+static void *bound_symbols[MpvSymbolCount];
 static atomic_int scope_bound;
 
 int mpvqml_fault_bind_scope(void *consumer)
@@ -59,8 +66,8 @@ int mpvqml_fault_bind_scope(void *consumer)
     if (error || !anchor || !dladdr(anchor, &libmpv)
         || !libmpv.dli_fbase || libmpv.dli_fbase == fixture.dli_fbase)
         return EINVAL;
-    void *resolved[4];
-    for (int i = 0; i < 4; ++i) {
+    void *resolved[MpvSymbolCount];
+    for (int i = 0; i < MpvSymbolCount; ++i) {
         dlerror();
         resolved[i] = dlsym(consumer, mpv_symbols[i]);
         error = dlerror();
@@ -79,7 +86,7 @@ int mpvqml_fault_bind_scope(void *consumer)
 static void *required_symbol(const char *name)
 {
     if (atomic_load_explicit(&scope_bound, memory_order_acquire)) {
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < MpvSymbolCount; ++i)
             if (strcmp(name, mpv_symbols[i]) == 0)
                 return bound_symbols[i];
     }
@@ -204,10 +211,35 @@ mpv_handle *mpv_create(void)
     return real_create();
 }
 
+int mpv_set_option_string(mpv_handle *handle, const char *name, const char *value)
+{
+    int (*real_set)(mpv_handle *, const char *, const char *) = required_symbol("mpv_set_option_string");
+    const int result = real_set(handle, name, value);
+    const int mode = atomic_load(&flags);
+    if (!(mode & (FaultCaptureWithoutLua | FaultCaptureScriptOptions)))
+        return result;
+    static const char *const script_options[] = {
+        "osc", "ytdl", "load-stats-overlay", "load-osd-console", "load-auto-profiles",
+        "load-select", "load-positioning", "load-commands", "load-context-menu"
+    };
+    for (size_t i = 0; i < sizeof(script_options) / sizeof(*script_options); ++i) {
+        if (strcmp(name, script_options[i]) == 0 && strcmp(value, "no") == 0) {
+            if (result >= 0 || result == MPV_ERROR_OPTION_NOT_FOUND)
+                atomic_fetch_or(&counters[FaultCaptureScriptDisables], 1L << i);
+            if (mode & FaultCaptureWithoutLua)
+                return MPV_ERROR_OPTION_NOT_FOUND;
+            break;
+        }
+    }
+    return result;
+}
+
 int mpv_initialize(mpv_handle *handle)
 {
     int (*real_initialize)(mpv_handle *) = required_symbol("mpv_initialize");
     atomic_fetch_add(&counters[FaultInitializes], 1);
+    if (atomic_load(&flags) & FaultInitializeBarrier)
+        await_release(FaultInitializeEntered, -1);
     if (atomic_load(&flags) & FaultInitialize)
         return MPV_ERROR_INVALID_PARAMETER;
     return real_initialize(handle);
@@ -234,15 +266,95 @@ mpv_handle *mpv_create_client(mpv_handle *core, const char *name)
     return client;
 }
 
+/* One capture per event-sequence child. Delaying real submission proves the
+ * inserted restart cannot possibly represent the new frame. */
+static _Thread_local char seek_position[64];
+static _Thread_local uint64_t seek_token;
+static _Thread_local int fake_events;
+
+int mpv_command_async(mpv_handle *handle, uint64_t token, const char **args)
+{
+    int (*real_command)(mpv_handle *, uint64_t, const char **) = required_symbol("mpv_command_async");
+    if ((atomic_load(&flags) & FaultCaptureEvents) && strcmp(args[0], "seek") == 0) {
+        if (strlen(args[1]) >= sizeof(seek_position) || strcmp(args[2], "absolute+exact"))
+            _exit(93);
+        strcpy(seek_position, args[1]);
+        seek_token = token;
+        fake_events = 2;
+        return 0;
+    }
+    return real_command(handle, token, args);
+}
+
 mpv_event *mpv_wait_event(mpv_handle *handle, double timeout)
 {
     mpv_event *(*real_wait)(mpv_handle *, double) = required_symbol("mpv_wait_event");
+    static _Thread_local mpv_event *held_reply;
+    if (held_reply) {
+        mpv_event *reply = held_reply;
+        held_reply = NULL;
+        return reply;
+    }
+    if (seek_token) {
+        static _Thread_local mpv_event stale;
+        if (fake_events == 2) {
+            --fake_events;
+            stale = (mpv_event){.event_id = MPV_EVENT_PLAYBACK_RESTART};
+            return &stale;
+        }
+        if (fake_events == 1) {
+            --fake_events;
+            stale = (mpv_event){.event_id = MPV_EVENT_COMMAND_REPLY, .error = MPV_ERROR_COMMAND,
+                                .reply_userdata = UINT64_MAX};
+            return &stale;
+        }
+        const char *command[] = {"seek", seek_position, "absolute+exact", NULL};
+        int (*real_command)(mpv_handle *, uint64_t, const char **) = required_symbol("mpv_command_async");
+        if (real_command(handle, seek_token, command) < 0)
+            _exit(94);
+        seek_token = 0;
+        atomic_fetch_add(&counters[FaultCaptureSeekSubmitted], 1);
+    }
     mpv_event *event = real_wait(handle, timeout);
+    if (event->event_id == MPV_EVENT_GET_PROPERTY_REPLY &&
+        (atomic_fetch_and(&flags, ~FaultPlaybackOverflow) & FaultPlaybackOverflow)) {
+        static _Thread_local mpv_event overflow;
+        held_reply = event;
+        overflow = (mpv_event){.event_id = MPV_EVENT_QUEUE_OVERFLOW};
+        return &overflow;
+    }
+    if ((atomic_load(&flags) & FaultCaptureEvents)
+        && (event->event_id == MPV_EVENT_COMMAND_REPLY || event->event_id == MPV_EVENT_FILE_LOADED
+            || event->event_id == MPV_EVENT_SEEK || event->event_id == MPV_EVENT_PLAYBACK_RESTART))
+        fprintf(stderr, "CAPTURE_NATIVE_EVENT %s token=%llu error=%d\n",
+                mpv_event_name(event->event_id), (unsigned long long)event->reply_userdata, event->error);
     if ((atomic_load(&flags) & FaultSynchronousWakeup)
         && (uintptr_t)handle == atomic_load(&latest_helper_handle)
         && event && event->event_id == MPV_EVENT_NONE)
         atomic_fetch_add(&counters[FaultHelperEmptyDrains], 1);
     return event;
+}
+
+int mpv_render_context_render(mpv_render_context *context, mpv_render_param *parameters)
+{
+    int (*real_render)(mpv_render_context *, mpv_render_param *) = required_symbol("mpv_render_context_render");
+    if (atomic_load(&flags) & FaultCaptureBeforePublish) {
+        for (mpv_render_param *p = parameters; p->type; ++p) {
+            if (p->type == MPV_RENDER_PARAM_SW_POINTER) {
+                await_release(FaultCaptureRenderEntered, -1);
+                break;
+            }
+        }
+    }
+    return real_render(context, parameters);
+}
+
+int linkat(int olddir, const char *oldpath, int newdir, const char *newpath, int options)
+{
+    int (*real_link)(int, const char *, int, const char *, int) = required_symbol("linkat");
+    if ((atomic_load(&flags) & FaultCapturePublish) && strcmp(newpath, "publish.png") == 0)
+        await_release(FaultCapturePublishEntered, -1);
+    return real_link(olddir, oldpath, newdir, newpath, options);
 }
 
 void mpv_terminate_destroy(mpv_handle *handle)
@@ -264,7 +376,55 @@ int mpv_render_context_create(mpv_render_context **context, mpv_handle *handle,
     atomic_fetch_add(&counters[FaultRenderCreates], 1);
     if (atomic_load(&flags) & FaultRenderCreate)
         return MPV_ERROR_UNSUPPORTED;
-    return real_create(context, handle, parameters);
+    const int result = real_create(context, handle, parameters);
+    if (result >= 0 && *context) {
+        pthread_mutex_lock(&render_mutex);
+        int index = 0;
+        while (index < 32 && render_owners[index].context)
+            ++index;
+        if (index == 32)
+            _exit(91); /* fixture cannot silently stop observing ownership */
+        render_owners[index].context = *context;
+        render_owners[index].thread = pthread_self();
+        render_owners[index].registered = 0;
+        atomic_fetch_add(&counters[FaultRenderLive], 1);
+        pthread_mutex_unlock(&render_mutex);
+    }
+    return result;
+}
+
+void mpv_render_context_set_update_callback(mpv_render_context *context,
+                                          mpv_render_update_fn callback, void *opaque)
+{
+    void (*real_register)(mpv_render_context *, mpv_render_update_fn, void *)
+        = required_symbol("mpv_render_context_set_update_callback");
+    real_register(context, callback, opaque); /* unregister is a native barrier */
+    pthread_mutex_lock(&render_mutex);
+    for (int index = 0; index < 32; ++index)
+        if (render_owners[index].context == context)
+            render_owners[index].registered = callback != NULL;
+    pthread_mutex_unlock(&render_mutex);
+}
+
+void mpv_render_context_free(mpv_render_context *context)
+{
+    void (*real_free)(mpv_render_context *) = required_symbol("mpv_render_context_free");
+    pthread_mutex_lock(&render_mutex);
+    int index = 0;
+    while (index < 32 && render_owners[index].context != context)
+        ++index;
+    if (index == 32)
+        _exit(92);
+    if (!pthread_equal(render_owners[index].thread, pthread_self()))
+        atomic_fetch_add(&counters[FaultRenderWrongThread], 1);
+    if (render_owners[index].registered)
+        atomic_fetch_add(&counters[FaultRenderFreeWithCallback], 1);
+    /* The allocation can be reused as soon as native free releases it. */
+    render_owners[index].context = NULL;
+    pthread_mutex_unlock(&render_mutex);
+    real_free(context);
+    atomic_fetch_sub(&counters[FaultRenderLive], 1);
+    atomic_fetch_add(&counters[FaultRenderFrees], 1);
 }
 
 void mpv_set_wakeup_callback(mpv_handle *handle, void (*callback)(void *), void *context)

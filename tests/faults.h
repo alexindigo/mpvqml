@@ -8,7 +8,14 @@ enum MpvQmlFault {
   FaultTlsBarrier = 8,
   FaultRenderCreate = 16,
   FaultFileBarrier = 32,
-  FaultSynchronousWakeup = 64
+  FaultSynchronousWakeup = 64,
+  FaultInitializeBarrier = 128,
+  FaultCaptureEvents = 256,
+  FaultCaptureBeforePublish = 512,
+  FaultCapturePublish = 1024,
+  FaultPlaybackOverflow = 2048,
+  FaultCaptureWithoutLua = 4096,
+  FaultCaptureScriptOptions = 8192
 };
 
 enum MpvQmlFaultCounter {
@@ -23,6 +30,10 @@ enum MpvQmlFaultCounter {
   FaultTlsEntered,
   FaultTlsCompleted,
   FaultRenderCreates,
+  FaultRenderLive,
+  FaultRenderFrees,
+  FaultRenderWrongThread,
+  FaultRenderFreeWithCallback,
   FaultFileOpens,
   FaultFileWrites,
   FaultFileWritesCompleted,
@@ -30,6 +41,11 @@ enum MpvQmlFaultCounter {
   FaultHelperClients,
   FaultHelperAddressReuses,
   FaultHelperEmptyDrains,
+  FaultInitializeEntered,
+  FaultCaptureSeekSubmitted,
+  FaultCapturePublishEntered,
+  FaultCaptureRenderEntered,
+  FaultCaptureScriptDisables,
   FaultCounterCount
 };
 

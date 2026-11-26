@@ -39,6 +39,7 @@ signals:
     void fileLoaded();
     void endFile(const QString &reason);
     void videoReconfig();
+    void playbackEvent(const QVariantMap &details);
     void asyncCommandFinished(int id, int error, const QVariant &result);
     void mpvPropertySetFinished(int id, int error);
     void mpvPropertyReadFinished(int id, int error, const QVariant &value);

@@ -17,6 +17,20 @@ MpvPlayer {
 
 ---
 
+## Discovering the module
+
+For a build tree add the build directory to `QML_IMPORT_PATH`. For a prefix
+install add `<prefix>/<CMAKE_INSTALL_LIBDIR>/qt6/qml` if Qt does not already
+search it. `import MpvQml 1.0` does not identify the library build or imply
+`MpvFrameCapture` exists: use a pinned candidate or a release with proven
+capture capability. See [the installed pixel probe](README.md#installed-module-regression-linux).
+
+Installed C++ playback consumers use `find_package(mpvqml 0.2 CONFIG REQUIRED)`
+and link `mpvqml::mpvqml`. The package exports `mpvplayer.h` and
+`mpvcontroller_iface.h` under `mpvqml/` with their required dependencies.
+Frame capture remains QML-only; the installed source copy of its header is
+not a public C++ interface.
+
 ## Properties
 
 ### Media source
@@ -34,7 +48,7 @@ MpvPlayer {
 | `paused` | bool | Pause or resume playback. |
 | `position` | double | Current playback position in seconds. Read-only. |
 | `duration` | double | Total duration of the current media in seconds. Read-only. |
-| `playbackSpeed` | double | Playback speed multiplier (0.01 -- 100.0, default 1.0). |
+| `playbackSpeed` | double | Playback speed multiplier (default 1.0). The typed setter clamps the minimum to 0.01; libmpv validates the submitted value. |
 | `seeking` | bool | True while a seek operation is in progress. Read-only. |
 | `isBuffering` | bool | True while the player is buffering. Read-only. |
 
@@ -59,7 +73,7 @@ MpvPlayer {
 | `hasVideo` | bool | True if the current media has a video stream. Read-only. |
 | `brightness` | double | Brightness adjustment (-100.0 -- 100.0, default 0.0). |
 | `contrast` | double | Contrast adjustment (-100.0 -- 100.0, default 0.0). |
-| `videoZoom` | double | Video zoom factor (default 1.0). |
+| `videoZoom` | double | Logarithmic video zoom; 0 (default) is unchanged and 1 doubles the scale. |
 | `videoPanX` | double | Horizontal pan offset (default 0.0). |
 | `videoPanY` | double | Vertical pan offset (default 0.0). |
 
@@ -153,8 +167,8 @@ player.loadDirectory("/path/to/videos", ["*.mp4", "*.mkv"], "replace", "name")
 | Method | Description |
 |---|---|
 | `load(url, mode)` | Load a media file or URL. `mode`: `"replace"` (default), `"append"`, `"append-play"`. |
-| `loadDirectory(path, fileFilters, mode, sortOrder)` | Scan a directory and load matching files. `sortOrder`: `"name"`, `"date"`, `"size"`. |
-| `clearPlaylist()` | Remove all items from the playlist. |
+| `loadDirectory(path, fileFilters, mode, sortOrder)` | Scan off the GUI thread and load matches in order. `"replace"` starts the first match and appends the rest. All other modes, including `"append-play"`, append without starting playback. Missing directories and empty matches leave the playlist unchanged. `sortOrder`: `"name"`, `"date"`, `"size"`. |
+| `clearPlaylist()` | Remove every entry except the one playing, and cancel deferred playlist loads. Use `stop()` to also end playback and clear the playlist. |
 | `stop(keepPlaylist)` | Stop playback. `keepPlaylist`: `false` clears the playlist, `true` keeps it. |
 
 ### Playback control
@@ -197,6 +211,9 @@ player.selectTrack("subtitle", 0)     // disable subtitles
 | `addVideoTrack(url)` | Append an external video track. |
 | `addSubtitleTrack(url)` | Append an external subtitle file. |
 | `selectTrack(type, id)` | Select a track by type (`"audio"`, `"video"`, `"sub"`, `"subtitle"`) and ID. ID `0` disables the track type. |
+
+Video track selection changes the active entry in place; it does not reload the
+`source` URL or schedule a seek on a later file load.
 
 ### Video and audio filters
 
@@ -326,6 +343,15 @@ blocking read/command methods are removed; there is no raw `setProperty` API.
 Typed setters and convenience actions use the same queued interface. Their
 errors use `operationFailed(operation, code, message)` / `errorOccurred`, and
 their completions are not reported as caller `asyncCommandFinished` requests.
+Typed property getters show pending local intent until the matching write and
+read-back settle. Older observations cannot replace pending intent. A rejected
+write reconciles to the native value, or the last available observation (the
+initial value if nothing has been observed). An unavailable observation isn't a
+zero or a clear. Raw properties remain an escape hatch; recognized observations
+update the associated typed getters when no local write is pending. `fillMode`
+expresses intent for `keepaspect` and `panscan`, not an interpretation of raw state.
+Empty shader lists and screenshot directory strings are explicit clears, including
+when deferred until renderer readiness.
 Screenshot convenience submission is asynchronous; shutdown does not promise
 to cancel an already-running file write.
 
@@ -344,9 +370,68 @@ onVideoReconfig: console.log("video reconfigured")
 |---|---|---|
 | `playbackEnded()` | -- | Playback reached the end of the file. |
 | `fileStarted()` | -- | A new file has started loading. |
-| `fileLoaded()` | -- | A file has finished loading and is ready to play. |
-| `endFile(reason)` | `reason`: string | Playback ended. `reason` is `"eof"`, `"stop"`, `"error"`, etc. |
+| `fileLoaded()` | -- | The file is loaded, not necessarily producing output. |
+| `endFile(reason)` | `reason`: string | Legacy reasons: `"eof"`, `"stop"`, or `"error"`. |
+| `playbackEvent(details)` | `details`: var | Owned native lifecycle diagnostic; see below. |
 | `videoReconfig()` | -- | Video parameters changed (resolution, aspect ratio, etc.). |
+
+`playbackEvent` carries `stage` (`start-file`, `file-loaded`, `seek`,
+`playback-restart`, `end-file`, `queue-overflow` or `shutdown`), `entryId`,
+`generation`, `reason`, `nativeReason`, `nativeCode` and `message`. Entry and
+generation identifiers are decimal strings (empty when unknown) so no 64-bit
+identity is rounded by JavaScript. Generations are scoped to one player and
+change on native starts and queue overflow. The stage is not associated with
+a caller request ID. `end-file` exposes the original native reason (including
+`quit`, `redirect` and `unknown`) and code; the legacy `endFile("error")` /
+`errorOccurred(LoadingFailed, ...)` pair stays unchanged. Other stages have
+empty reason, `nativeReason: -1`, and zero code except `queue-overflow`, whose
+diagnostic code is `EventQueueFull`. Notification follows native order within
+this signal, and precedes any corresponding legacy lifecycle signal.
+
+Overflow means some unsolicited events were lost. Discard lifecycle inference
+and wait for a fresh start for known entry correlation. The library invalidates
+renderer recovery and refreshes property observations; the last available
+values remain visible until refreshed. Already reserved command/property replies
+are not failed or replayed merely because of overflow.
+
+The command reply, file load and playback restart answer separate questions.
+For video presentation, a restart is not proof that a Qt window drew a frame.
+Invoke `openMedia()` with a local path once the player is initialized (and when
+renderer-ready for an attached video player):
+
+<!-- playback-example -->
+```qml
+import MpvQml
+
+MpvPlayer {
+    property int loadRequest: 0
+    property bool commandAccepted: false
+    property int restartCount: 0
+
+    function openMedia(path: string) {
+        commandAccepted = false
+        restartCount = 0
+        loadRequest = commandAsync(["loadfile", path])
+        if (loadRequest < 0) console.warn("Load not admitted:", loadRequest)
+    }
+
+    onAsyncCommandFinished: (id, error, result) => {
+        if (id === loadRequest) commandAccepted = error === 0
+    }
+    onPlaybackEvent: details => {
+        if (details.stage === "playback-restart") ++restartCount
+        if (details.stage === "end-file" && details.nativeCode < 0)
+            console.warn("Playback failed:", details.nativeCode, details.message)
+    }
+}
+```
+
+For screenshots where the caller needs a result, submit
+`commandAsync(["screenshot-to-file", privatePath, "video"])` and match its
+`asyncCommandFinished` ID. A successful reply does not manage the file's lifetime
+or publish it to a shared destination. Own the private path and validate the
+image before handing it to another consumer. `shutdown()` does not cancel an
+in-flight file write.
 
 ```qml
 onErrorOccurred: function(code, msg) {
@@ -360,6 +445,7 @@ onLogMessage: function(facility, level, text) {
 | Signal | Arguments | Description |
 |---|---|---|
 | `errorOccurred(code, message)` | `code`: int, `message`: string | A playback error occurred. |
+| `operationFailed(operation, code, message)` | `operation`: string, `code`: int, `message`: string | An operation failed; includes the original seam/renderer message when available. |
 | `logMessage(facility, level, text)` | `facility`: string, `level`: string, `text`: string | A log message from mpv. Enable with `setLogLevel()`. |
 
 ```qml
@@ -412,6 +498,109 @@ See `mpvError` values: `Success`, `EventQueueFull`, `NoMem`,
 
 ---
 
+## Headless video frame capture
+
+`MpvFrameCapture` is a non-visual `MpvQml` type. It needs no Qt Quick
+window, graphics backend or playback item. Give it absolute `file:` URLs
+and a caller-owned private staging directory (which must already exist).
+Publication never replaces an existing file, link, or competing writer's
+result. The staging filesystem must allow hard links within that directory.
+On Linux an accessible `/proc/<pid>/fd/<directory-fd>` may name the directory.
+Keep that descriptor open through `finished`, or through `capacityReleased`
+if cancellation succeeds; a positive ticket does not mean the worker has
+opened the directory yet.
+
+<!-- capture-example -->
+```qml
+import MpvQml
+
+MpvFrameCapture {
+    property int ticket: 0
+    property bool staged: false
+
+    function requestFrame(sourceUrl: url, privatePngUrl: url) {
+        if (ticket > 0) return
+        staged = false
+        ticket = capture(sourceUrl, 0.75, 123, 88, privatePngUrl)
+        if (ticket < 0) console.warn("Capture not admitted:", ticket)
+    }
+    onFinished: (id, code, reason) => {
+        if (id !== ticket) return
+        ticket = 0
+        staged = code === "" // Validate the caller-owned PNG before publication.
+    }
+}
+```
+
+`capture(source, fraction, maxWidth, maxHeight, destination)` selects one
+frame at the given fraction of duration (`0 <= fraction < 1`). A zero
+fraction or unknown/sub-second duration uses the first frame. Bounds are
+positive integers up to 4096 pixels per edge. Output is a PNG fitted within
+the bounds without intentional upscaling, and excludes audio, subtitles
+and playback UI. Regular local files only; user configuration, scripts and
+external file references are disabled. The library does not manage the
+staging directory or a persistent cache.
+
+libmpv requires the process-wide `LC_NUMERIC` locale to remain `C` while
+its cores are live. mpvqml sets it before core creation, does not restore
+it, and cannot serialize unrelated host locale changes. Hosts must not
+change `LC_NUMERIC` while using libmpv.
+
+A positive ID means admitted, not decoded. `finished(id, code, reason)`
+is queued after admission, exactly once per positive ID while the capture
+object exists. Empty `code` means the PNG is committed; otherwise `code`
+identifies the failed stage and `reason` is diagnostic text. Negative
+admission returns are libmpv error codes and get no signal. Two requests
+may run per instance, further subject to the shared native lease limit.
+
+`finishedDetailed(id, detail)` follows the legacy signal if the object still
+exists. It carries the same `code` and `reason`, the stage (`open-input`,
+`initialize-core`, `initialize-render`, `load-command`, `initial-frame`,
+`seek-command`, `seek-frame`, `render`, `encode`, `publish`, `complete`,
+or `cancelled`), and integer `mpvError` and `systemError` fields. These fields
+are zero when no corresponding libmpv error or system errno is available.
+Both signals describe the same terminal outcome, not two results.
+
+Alternatively, `tryCapture(source, fraction, maxWidth, maxHeight, destination)`
+submits the same job and returns `{ status, id, error, reason }`. Use one
+admission method per attempt. `status` is one of the `MpvFrameCapture` enum
+values below. An accepted job has a positive `id`, zero `error`, and an empty
+`reason`; a rejected request has `id: 0`, a negative libmpv `error`, and a
+diagnostic `reason`. Only accepted jobs emit `finished`.
+
+| Status | Meaning |
+|---|---|
+| `Accepted` | Job admitted; wait for its terminal result. |
+| `InvalidArguments` | Correct the arguments before trying again. |
+| `LocalBusy` | Both slots on this object are occupied. |
+| `SharedBusy` | The process-wide playback/capture pool is full. |
+| `IdExhausted` | This object's positive ID space is exhausted. |
+| `AllocationFailed` | The library could not allocate job or core ownership. |
+| `BackendUnavailable` | The native retirement service could not start. |
+| `WorkerUnavailable` | The capture worker could not start. |
+
+On local pressure, `capacityReleased(id)` announces that the named job
+has freed its local and shared slots. It follows `finished` and is not
+emitted for rejected requests. A non-cancelled `finished` handler may
+already retry. On shared pressure, use `capacityAvailable()` with a backed-off
+timer to observe capacity freed by other objects or playback. The method is
+an advisory snapshot of ID and slot space, not a reservation or a backend
+health check. A release is not a guarantee that another requester has not
+already taken the slot.
+
+`cancel(id)` returns true if it stopped publication. It queues a
+`cancelled` result and cannot publish that job's PNG. False means the
+request was unknown, previously cancelled, or has begun atomic publication.
+Use unique destinations; a cancelled request retains its worker slot until
+native cleanup finishes. Destruction drops callbacks and cancels any job
+that has not begun publication without joining native work. The 7-second
+deadline starts at admission and is checked at work boundaries, including
+before encoding and before entering publication. Once publication begins,
+the result reports whether it committed, not whether the deadline elapsed.
+The 4096-pixel output edges, 64-MiPixel decoder limit and native job limits
+bound different resources; none preempts stalled I/O or native calls or
+isolates decoder faults. A consumer may apply its own waiting deadline.
+
 ## Track and playlist data
 
 `trackList` and `playlist` return mpv data as a list of objects with converted
@@ -463,6 +652,15 @@ destruction does not join final-core file I/O: reserved native retirement worker
 retain live handles until destruction actually completes. Native render cleanup
 still uses the original GL thread, and this does not bound arbitrary graphics
 driver stalls or delete accepted screenshot files.
+
+`shutdown()` and native core loss both close admission, clear renderer readiness
+and detach the live renderer. The item/window may remain alive; resizing or
+synchronizing it cannot reacquire a core or display another video frame. The
+facade releases its lease without waiting for native retirement. A hidden item
+in a rendering window does not need another item synchronization to release its
+context. If the window itself cannot render, cleanup waits for its next render
+or scene-graph destruction. An injected C++ controller is borrowed and is not
+shut down or deleted by this transition.
 
 ---
 

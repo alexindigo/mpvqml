@@ -1,7 +1,7 @@
 #include <mpvqml/mpvplayer.h>
+#include "installed-mappings.h"
 #include <QGuiApplication>
 #include <QEventLoop>
-#include <QFile>
 #include <QTimer>
 #include <QDebug>
 #include <type_traits>
@@ -10,8 +10,7 @@ static_assert(std::is_base_of_v<QQuickFramebufferObject, MpvPlayer>);
 
 int main(int argc, char **argv) {
     QGuiApplication application(argc, argv);
-    QFile maps(QStringLiteral("/proc/self/maps"));
-    if (!maps.open(QIODevice::ReadOnly) || maps.readAll().contains("libMpvQt")) return 3;
+    if (argc != 4 || !verifyInstalledMappings(QString::fromLocal8Bit(argv[1]), argv[2], argv[3], false)) return 3;
     QEventLoop loop;
     MpvPlayer player;
     if (!player.coreAvailable()) return 4;

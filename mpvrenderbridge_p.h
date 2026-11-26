@@ -7,6 +7,7 @@
  */
 #pragma once
 
+#include "mpvbackendcore_p.h"
 #include <QObject>
 #include <QString>
 #include <QVariantMap>
@@ -17,19 +18,19 @@
 
 namespace MpvQmlPrivate {
 
-// A reservation exists before mpv_create(). Every published handle therefore
-// already has storage for its eventual allocation-free retirement transfer.
+// A playback session shares its native owner across worker, facade and renderer.
 class MpvCoreLease final {
 public:
-  static std::shared_ptr<MpvCoreLease> reserve(int &error, QString &message);
-  static int outstandingReservations() noexcept;
-  ~MpvCoreLease();
+  static std::shared_ptr<MpvCoreLease> reserve(MpvCoreDiagnostic &diagnostic);
+  static int outstandingReservations() { return MpvBackendCore::outstandingReservations(); }
   MpvCoreLease(const MpvCoreLease &) = delete;
   MpvCoreLease &operator=(const MpvCoreLease &) = delete;
 
-  void publish(mpv_handle *handle) noexcept;
-  mpv_handle *handle() const noexcept { return m_handle; }
-  int reservation() const noexcept { return m_reservation; }
+  MpvCoreDiagnostic initialize(std::initializer_list<MpvBackendCore::Option> options) {
+    return m_backend->initialize(options);
+  }
+  mpv_handle *handle() const noexcept { return m_backend->handle(); }
+  int reservation() const noexcept { return m_backend->reservation(); }
   bool claimRenderer(quint64 generation) noexcept;
   void releaseRenderer(quint64 generation) noexcept;
   quint64 allocateNativeToken() noexcept;
@@ -40,9 +41,8 @@ public:
   quint64 retiringContext(quint64 intent) const noexcept;
 
 private:
-  explicit MpvCoreLease(int reservation) noexcept;
-  int m_reservation;
-  mpv_handle *m_handle = nullptr;
+  explicit MpvCoreLease(std::unique_ptr<MpvBackendCore> backend) noexcept;
+  const std::unique_ptr<MpvBackendCore> m_backend;
   std::atomic<quint64> m_renderOwner{0};
   std::atomic<quint64> m_nextNativeToken{1};
   std::atomic<quint64> m_sourceIntent{0};

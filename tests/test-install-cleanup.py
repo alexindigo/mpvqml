@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 
+from install_scratch import scratch_parent
 from termination_guard import unwind_on_termination
 
 
@@ -36,11 +37,13 @@ def worker(build, ready):
 
 
 def interrupted_install(build, signum):
+    source = Path(__file__).resolve().parent.parent
+    source_mode = stat.S_IMODE(source.stat().st_mode)
     original_mode = stat.S_IMODE(build.stat().st_mode)
     if original_mode == 0 or build.stat().st_uid != os.getuid():
         raise RuntimeError("requires an accessible user-owned generated build")
     process = None
-    with tempfile.TemporaryDirectory(prefix="install-signal-", dir=build.parent) as scratch:
+    with tempfile.TemporaryDirectory(prefix="install-signal-", dir=scratch_parent(source, build)) as scratch:
         ready = Path(scratch) / "ready"
         try:
             process = subprocess.Popen(
@@ -53,9 +56,10 @@ def interrupted_install(build, signum):
                 if time.monotonic() >= deadline:
                     raise RuntimeError("worker did not reach the protected phase")
                 time.sleep(0.02)
-            denied = stat.S_IMODE(build.stat().st_mode)
-            if denied != 0:
-                raise RuntimeError("consumer boundary did not observe an inaccessible build")
+            denied = None if source in build.parents else stat.S_IMODE(build.stat().st_mode)
+            if denied not in (None, 0) or os.access(build, os.R_OK | os.X_OK) \
+                    or stat.S_IMODE(source.stat().st_mode) != 0:
+                raise RuntimeError("consumer boundary did not observe inaccessible product trees")
             os.kill(process.pid, signum)
             output = process.communicate(timeout=10)[0]
             after_mode = stat.S_IMODE(build.stat().st_mode)
@@ -64,7 +68,9 @@ def interrupted_install(build, signum):
             except ValueError:
                 receipt = {}
             passed = (process.returncode == 128 + signum and after_mode == original_mode
-                      and receipt.get("status") == "FAIL" and receipt.get("build_mode_restored") is True)
+                      and stat.S_IMODE(source.stat().st_mode) == source_mode
+                      and receipt.get("status") == "FAIL" and receipt.get("build_mode_restored") is True
+                      and receipt.get("source_mode_restored") is True)
             return {"signal": signal.Signals(signum).name, "exit": process.returncode,
                     "denied_mode": denied, "original_mode": original_mode, "after_mode": after_mode,
                     "passed": passed, "install_receipt": receipt}
@@ -74,6 +80,7 @@ def interrupted_install(build, signum):
             if process is not None and process.poll() is None:
                 process.kill()
                 process.communicate(timeout=10)
+            source.chmod(source_mode)
             build.chmod(original_mode)
 
 

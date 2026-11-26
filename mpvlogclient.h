@@ -4,6 +4,8 @@
 #include <memory>
 #include <mpv/client.h>
 
+namespace MpvQmlPrivate { class MpvEventClient; }
+
 class MpvLogClient : public QObject {
     Q_OBJECT
 public:
@@ -15,12 +17,5 @@ public:
 signals:
     void logMessage(const QString &facility, const QString &level, const QString &text);
 private:
-    struct WakeupToken;
-    static void onLogWakeup(void *context) noexcept;
-    void drainLogEvents(quint64 generation);
-    mpv_handle *m_logClient = nullptr;
-    std::unique_ptr<WakeupToken> m_wakeup;
-    quint64 m_generation = 1;
-    bool m_draining = false;
-    bool m_redrain = false;
+    std::unique_ptr<MpvQmlPrivate::MpvEventClient> m_events;
 };

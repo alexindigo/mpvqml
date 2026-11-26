@@ -6,6 +6,8 @@
  * See UPSTREAM.md. Native input ownership and reply decoding are local fixes.
  */
 #include "mpvcontroller_p.h"
+#include <QSet>
+#include "mpvmediaeffect_p.h"
 
 #include <QByteArray>
 #include <QStringList>
@@ -13,7 +15,6 @@
 #include <QThread>
 #include <QTimer>
 #include <array>
-#include <clocale>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -228,19 +229,15 @@ QVariant copyPropertyValue(const mpv_event_property *property, int &error) {
   }
 }
 
-struct MpvController::WakeupToken {
-  WakeupToken(MpvController *object, quint64 value) : receiver(object), generation(value) {}
-  MpvController *const receiver;
-  const quint64 generation;
-  std::atomic<bool> pending{false};
-};
-
 MpvController::MpvController(std::shared_ptr<MpvCoreLease> core)
-    : QObject(nullptr), m_core(std::move(core)) {
+    : QObject(nullptr), m_core(std::move(core)),
+      m_events(this, [](QObject *receiver, const mpv_event &event) {
+        static_cast<MpvController *>(receiver)->receiveEvent(event);
+      }) {
   qRegisterMetaType<MpvNativeReply>();
 }
 
-MpvController::~MpvController() { unregisterWakeup(); }
+MpvController::~MpvController() = default;
 
 bool MpvController::available() const noexcept {
   return !m_closing && m_available && m_core && m_core->handle();
@@ -256,66 +253,24 @@ void MpvController::initialize() {
     emit initializationFinished(false, m_initialization.error, m_initialization.message);
     return;
   }
-  try {
-    m_wakeup = std::make_unique<WakeupToken>(this, m_generation);
-  } catch (const std::bad_alloc &) {
+  if (!m_events.prepare()) {
     m_initialization.error = MPV_ERROR_NOMEM;
     m_initialization.message = QStringLiteral("Cannot allocate mpv wakeup registration");
     emit initializationFinished(false, m_initialization.error, m_initialization.message);
     return;
   }
-  std::setlocale(LC_NUMERIC, "C");
-  std::unique_ptr<mpv_handle, decltype(&mpv_destroy)> candidate(mpv_create(), mpv_destroy);
-  int error = MPV_ERROR_GENERIC;
-  QString message = QStringLiteral("mpv_create returned null: core creation failed");
-  if (candidate) {
-    error = mpv_set_option_string(candidate.get(), "vo", "libmpv");
-    if (error >= 0)
-      error = mpv_initialize(candidate.get());
-    message = error < 0 ? QString::fromUtf8(mpv_error_string(error)) : QString();
-  }
-  m_initialization.error = error;
-  m_initialization.message = message;
-  m_initialization.success = error >= 0;
+  const auto diagnostic = m_core->initialize({{"vo", "libmpv"}});
+  m_initialization = {true, diagnostic.error >= 0, diagnostic.error, diagnostic.message, diagnostic.stage};
   if (m_initialization.success) {
-    m_core->publish(candidate.release());
     m_available = true;
-    // Registration may synchronously invoke the callback. Publish the fully
-    // initialized immutable token and receiver before entering libmpv.
-    m_wakeupRegistered = true;
-    mpv_set_wakeup_callback(m_core->handle(), &wakeup, m_wakeup.get());
+    m_events.open(m_core->handle(), MpvEventClient::Lifetime::Borrowed);
     // Bounded owned observations support recovery without reading/waiting on
     // the controller from synchronize/render/destruction.
-    mpv_observe_property(m_core->handle(), 0, "playlist", MPV_FORMAT_NODE);
-    mpv_observe_property(m_core->handle(), 0, "time-pos", MPV_FORMAT_DOUBLE);
-    mpv_observe_property(m_core->handle(), 0, "pause", MPV_FORMAT_FLAG);
+    observe(QStringLiteral("playlist"), MPV_FORMAT_NODE, 0);
+    observe(QStringLiteral("time-pos"), MPV_FORMAT_DOUBLE, 0);
+    observe(QStringLiteral("pause"), MPV_FORMAT_FLAG, 0);
   }
-  emit initializationFinished(m_initialization.success, error, message);
-}
-
-void MpvController::wakeup(void *context) noexcept {
-  auto *token = static_cast<WakeupToken *>(context);
-  if (token->pending.exchange(true, std::memory_order_acq_rel))
-    return;
-  MpvController *const receiver = token->receiver;
-  const quint64 generation = token->generation;
-  try {
-    if (QMetaObject::invokeMethod(receiver, [receiver, generation]() {
-          receiver->drain(generation);
-        }, Qt::QueuedConnection))
-      return;
-  } catch (...) {
-  }
-  token->pending.store(false, std::memory_order_release);
-}
-
-void MpvController::unregisterWakeup() {
-  if (!m_wakeup)
-    return;
-  if (m_wakeupRegistered)
-    mpv_set_wakeup_callback(m_core->handle(), nullptr, nullptr);
-  m_wakeupRegistered = false;
-  m_wakeup.reset(); // native callback barrier has completed
+  emit initializationFinished(m_initialization.success, diagnostic.error, diagnostic.message);
 }
 
 void MpvController::shutdown() {
@@ -325,7 +280,7 @@ void MpvController::shutdown() {
   m_recovery.valid = false;
   m_available = false;
   ++m_generation;
-  unregisterWakeup();
+  m_events.close();
   QThread::currentThread()->quit();
 }
 
@@ -340,16 +295,11 @@ void MpvController::submitCommand(quint64 token, const QStringList &parameters) 
     m_core->noteNativeToken(token);
     if (!parameters.isEmpty()) {
       const QString &command = parameters[0];
-      const QString mode = parameters.size() > 2 ? parameters[2] : QStringLiteral("replace");
-      const bool changesFile = command == QStringLiteral("loadfile")
-          && mode != QStringLiteral("append")
-          && !(mode == QStringLiteral("append-play") && m_playback.loaded);
-      if (changesFile || command == QStringLiteral("loadlist")
-          || command == QStringLiteral("stop") || command == QStringLiteral("quit")
-          || command == QStringLiteral("playlist-next") || command == QStringLiteral("playlist-prev")
-          || command == QStringLiteral("playlist-play-index"))
+      const auto effect = commandMediaEffect(parameters);
+      if (effect == MediaEffect::Replace || (effect == MediaEffect::ReplaceIfIdle && !m_playback.loaded))
         invalidatePlaybackIntent();
-      if (command == QStringLiteral("seek") || command == QStringLiteral("revert-seek")) {
+      if (effect == MediaEffect::Pause) ++m_pauseRevision;
+      if (effect == MediaEffect::Seek) {
         ++m_seekRevision;
         m_seekIntent.valid = false;
         if (command == QStringLiteral("seek") && parameters.size() > 1) {
@@ -379,18 +329,18 @@ void MpvController::submitPropertySet(quint64 token, const QString &name,
   int error = MPV_ERROR_UNINITIALIZED;
   if (available()) {
     m_core->noteNativeToken(token);
-    if (name == QStringLiteral("pause"))
+    const auto effect = propertyMediaEffect(name);
+    if (effect == MediaEffect::Pause)
       ++m_pauseRevision;
-    if (name == QStringLiteral("time-pos")) {
+    if (effect == MediaEffect::Seek) {
       ++m_seekRevision;
       m_seekIntent.valid = false;
       bool valid = false;
       const double position = value.toDouble(&valid);
-      if (valid && std::isfinite(position) && position >= 0)
+      if (name != QStringLiteral("percent-pos") && valid && std::isfinite(position) && position >= 0)
         rememberSeekIntent(position);
     }
-    if (name == QStringLiteral("playlist-pos") || name == QStringLiteral("playlist-current-pos")
-        || name == QStringLiteral("path"))
+    if (effect == MediaEffect::Replace)
       invalidatePlaybackIntent();
     MpvInputNode input;
     error = input.assign(value);
@@ -421,13 +371,15 @@ void MpvController::observe(const QString &name, mpv_format format, quint64 toke
   const int error = available()
       ? mpv_observe_property(m_core->handle(), token, name.toUtf8().constData(), format)
       : MPV_ERROR_UNINITIALIZED;
-  if (error < 0)
+  if (error >= 0)
+    m_observations.append({name, format, token});
+  else
     emit operationFailed(QStringLiteral("observeProperty"), error,
                          QString::fromUtf8(mpv_error_string(error)));
 }
 
 void MpvController::invalidatePlaybackIntent() {
-  m_core->advanceSourceIntent();
+  m_admittedMediaEpoch = m_core->advanceSourceIntent();
   m_recovery.valid = false;
   m_playback = {};
   m_terminatedPlayback = {};
@@ -611,20 +563,44 @@ bool MpvController::handleRecoveryReply(quint64 token, int error) {
   return true;
 }
 
-void MpvController::drain(quint64 generation) {
-  if (generation != m_generation || !available())
-    return;
-  m_wakeup->pending.store(false, std::memory_order_release);
-  if (m_draining) {
-    m_redrain = true;
-    return;
+QVariantMap MpvController::playbackDetails(const char *stage, qlonglong entryId, quint64 generation,
+                                         int code, int nativeReason, const QString &reason) const {
+  return {{"stage", QString::fromLatin1(stage)},
+          {"entryId", entryId < 0 ? QString() : QString::number(entryId)},
+          {"generation", generation == 0 ? QString() : QString::number(generation)},
+          {"reason", reason}, {"nativeReason", nativeReason}, {"nativeCode", code},
+          {"message", code < 0 ? QString::fromUtf8(mpv_error_string(code)) : QString()}};
+}
+
+void MpvController::reconcileEventOverflow() {
+  // libmpv resumes delivery after this marker. Reserved request replies are
+  // independent; replaying commands here could duplicate side effects.
+  invalidatePlaybackIntent();
+  m_playlist.clear();
+  m_observedPause = false;
+  m_eventEntry = -1; // current lifecycle cannot be inferred from a property read
+  ++m_eventGeneration;
+  const auto observations = std::exchange(m_observations, {});
+  auto *handle = m_events.handle();
+  QSet<quint64> tokens;
+  for (const auto &observation : observations) {
+    if (tokens.contains(observation.token)) continue;
+    mpv_unobserve_property(handle, observation.token);
+    tokens.insert(observation.token);
   }
-  m_draining = true;
   QPointer<MpvController> alive(this);
-  while (available() && generation == m_generation) {
-    const mpv_event *event = mpv_wait_event(m_core->handle(), 0);
-    if (!event || event->event_id == MPV_EVENT_NONE)
-      break;
+  for (const auto &observation : observations) {
+    observe(observation.name, observation.format, observation.token);
+    if (!alive || !available()) return;
+  }
+  emit playbackEvent(playbackDetails("queue-overflow", -1, m_eventGeneration, MPV_ERROR_EVENT_QUEUE_FULL));
+}
+
+void MpvController::receiveEvent(const mpv_event &nativeEvent) {
+  if (!available()) return;
+  const auto *event = &nativeEvent;
+  const auto generation = m_generation;
+  QPointer<MpvController> alive(this);
     switch (event->event_id) {
     case MPV_EVENT_PROPERTY_CHANGE: {
       const auto *property = static_cast<const mpv_event_property *>(event->data);
@@ -676,15 +652,18 @@ void MpvController::drain(quint64 generation) {
       const bool renderLossAdvance = m_recovery.valid && m_recovery.terminated
           && m_recovery.playback.intent == m_core->sourceIntent()
           && m_core->retiringContext(m_recovery.playback.intent) == m_recovery.retiredRenderer;
-      if (!resumed && !renderLossAdvance && m_playback.entryId >= 0 && entryId != m_playback.entryId)
+      if (!resumed && !renderLossAdvance && m_playback.entryId >= 0 && entryId != m_playback.entryId
+          && m_admittedMediaEpoch == m_core->sourceIntent())
         invalidatePlaybackIntent();
       m_playback = resumed ? m_recovery.playback : PlaybackState{};
       m_playback.entryId = entryId;
-      m_playback.intent = m_core->sourceIntent();
+      m_playback.intent = m_admittedMediaEpoch;
       m_playback.paused = m_observedPause;
       m_playback.pauseRevision = m_pauseRevision;
       m_playback.loaded = false;
-      emit fileStarted();
+      m_eventEntry = entryId;
+      emit playbackEvent(playbackDetails("start-file", entryId, ++m_eventGeneration));
+      if (alive && available()) emit fileStarted();
       break;
     }
     case MPV_EVENT_FILE_LOADED:
@@ -697,7 +676,14 @@ void MpvController::drain(quint64 generation) {
       tryRestorePosition();
       if (!alive)
         return;
-      emit fileLoaded();
+      emit playbackEvent(playbackDetails("file-loaded", m_eventEntry, m_eventGeneration));
+      if (alive && available()) emit fileLoaded();
+      break;
+    case MPV_EVENT_SEEK:
+      emit playbackEvent(playbackDetails("seek", m_eventEntry, m_eventGeneration));
+      break;
+    case MPV_EVENT_PLAYBACK_RESTART:
+      emit playbackEvent(playbackDetails("playback-restart", m_eventEntry, m_eventGeneration));
       break;
     case MPV_EVENT_VIDEO_RECONFIG:
       emit videoReconfig();
@@ -706,6 +692,11 @@ void MpvController::drain(quint64 generation) {
       const auto *ending = static_cast<const mpv_event_end_file *>(event->data);
       QString reason;
       if (ending) {
+        const qlonglong entryId = ending->playlist_entry_id;
+        const auto eventGeneration = entryId == m_eventEntry ? m_eventGeneration : 0;
+        if (entryId == m_eventEntry) m_eventEntry = -1;
+        const auto nativeReason = ending->reason;
+        const auto nativeCode = ending->error;
         if (ending->reason == MPV_END_FILE_REASON_ERROR && ending->error == MPV_ERROR_VO_INIT_FAILED
             && m_playback.loaded) {
           const quint64 retired = m_core->retiringContext(m_playback.intent);
@@ -726,34 +717,32 @@ void MpvController::drain(quint64 generation) {
           if (!alive)
             return;
         }
-        switch (ending->reason) {
+        switch (nativeReason) {
         case MPV_END_FILE_REASON_EOF: reason = QStringLiteral("eof"); break;
         case MPV_END_FILE_REASON_STOP: reason = QStringLiteral("stop"); break;
         case MPV_END_FILE_REASON_ERROR: reason = QStringLiteral("error"); break;
-        default: break;
+        case MPV_END_FILE_REASON_QUIT: reason = QStringLiteral("quit"); break;
+        case MPV_END_FILE_REASON_REDIRECT: reason = QStringLiteral("redirect"); break;
+        default: reason = QStringLiteral("unknown"); break;
         }
+        emit playbackEvent(playbackDetails("end-file", entryId, eventGeneration, nativeCode, nativeReason, reason));
       }
-      if (!reason.isEmpty())
+      if (alive && available() && (reason == "eof" || reason == "stop" || reason == "error"))
         emit endFile(reason);
       break;
     }
+    case MPV_EVENT_QUEUE_OVERFLOW:
+      reconcileEventOverflow();
+      break;
     case MPV_EVENT_SHUTDOWN:
       m_available = false;
-      unregisterWakeup();
-      emit coreUnavailable();
+      m_events.close();
+      emit playbackEvent(playbackDetails("shutdown", m_eventEntry, m_eventGeneration));
+      if (alive && !m_closing) emit coreUnavailable();
       break;
     default:
       break;
     }
-    // Every external signal can delete this sender or change its generation.
-    if (!alive)
-      return;
-  }
-  m_draining = false;
-  if (m_redrain && available() && generation == m_generation) {
-    m_redrain = false;
-    QMetaObject::invokeMethod(this, [this, generation]() { drain(generation); }, Qt::QueuedConnection);
-  }
 }
 
 struct MpvWorkerControl {
@@ -764,7 +753,7 @@ struct MpvWorkerControl {
 
 namespace {
 struct WorkerRegistry {
-  std::array<std::shared_ptr<MpvWorkerControl>, 32> controls;
+  std::array<std::shared_ptr<MpvWorkerControl>, MpvBackendCore::Capacity> controls;
   QObject *reaper = new QObject; // GUI-affine, no application/static teardown parent
 };
 
@@ -790,11 +779,10 @@ void reapWorker(std::shared_ptr<MpvWorkerControl> control) {
 } // namespace
 
 MpvBackendWorker::MpvBackendWorker() {
-  int error;
-  QString message;
-  auto core = MpvCoreLease::reserve(error, message);
+  MpvCoreDiagnostic diagnostic;
+  auto core = MpvCoreLease::reserve(diagnostic);
   if (!core) {
-    m_result = {true, false, error, message};
+    m_result = {true, false, diagnostic.error, diagnostic.message, diagnostic.stage};
     return;
   }
   m_control = std::make_shared<MpvWorkerControl>();

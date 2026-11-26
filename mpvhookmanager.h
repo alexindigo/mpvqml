@@ -4,6 +4,8 @@
 #include <memory>
 #include <mpv/client.h>
 
+namespace MpvQmlPrivate { class MpvEventClient; }
+
 class MpvHookManager : public QObject {
     Q_OBJECT
 public:
@@ -16,13 +18,6 @@ public:
 signals:
     void hookTriggered(const QString &name, uint64_t id);
 private:
-    struct WakeupToken;
-    static void onHookWakeup(void *context) noexcept;
-    void drainHookEvents(quint64 generation);
-    mpv_handle *m_hookClient = nullptr;
-    std::unique_ptr<WakeupToken> m_wakeup;
-    quint64 m_generation = 1;
+    std::unique_ptr<MpvQmlPrivate::MpvEventClient> m_events;
     uint64_t m_nextHookId = 1;
-    bool m_draining = false;
-    bool m_redrain = false;
 };

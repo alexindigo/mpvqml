@@ -2,7 +2,6 @@
 
 #include <QSignalSpy>
 #include <QtTest>
-#include <clocale>
 #include <thread>
 #include <vector>
 
@@ -14,38 +13,33 @@ private slots:
   void reservedAdmissionIsBoundedAndRecoverable() {
     QTRY_COMPARE(MpvCoreLease::outstandingReservations(), 0);
     std::vector<std::shared_ptr<MpvCoreLease>> leases;
-    int error = 0;
-    QString message;
-    for (int i = 0; i < 32; ++i) {
-      auto lease = MpvCoreLease::reserve(error, message);
-      QVERIFY2(lease, qPrintable(message));
-      QCOMPARE(error, MPV_ERROR_SUCCESS);
+    MpvCoreDiagnostic diagnostic;
+    for (int i = 0; i < MpvBackendCore::Capacity; ++i) {
+      auto lease = MpvCoreLease::reserve(diagnostic);
+      QVERIFY2(lease, qPrintable(diagnostic.message));
+      QCOMPARE(diagnostic.error, MPV_ERROR_SUCCESS);
       leases.push_back(std::move(lease));
     }
-    QCOMPARE(MpvCoreLease::outstandingReservations(), 32);
-    auto rejected = MpvCoreLease::reserve(error, message);
+    QCOMPARE(MpvCoreLease::outstandingReservations(), MpvBackendCore::Capacity);
+    auto rejected = MpvCoreLease::reserve(diagnostic);
     QVERIFY(!rejected);
-    QCOMPARE(error, MPV_ERROR_NOMEM);
-    QVERIFY(!message.isEmpty());
+    QCOMPARE(diagnostic.error, MPV_ERROR_NOMEM);
+    QCOMPARE(diagnostic.stage, MpvCoreStage::Capacity);
+    QVERIFY(!diagnostic.message.isEmpty());
     leases.clear();
     QCOMPARE(MpvCoreLease::outstandingReservations(), 0);
-    auto recovered = MpvCoreLease::reserve(error, message);
-    QVERIFY2(recovered, qPrintable(message));
-    QCOMPARE(error, MPV_ERROR_SUCCESS);
+    auto recovered = MpvCoreLease::reserve(diagnostic);
+    QVERIFY2(recovered, qPrintable(diagnostic.message));
+    QCOMPARE(diagnostic.error, MPV_ERROR_SUCCESS);
   }
 
   void finalNativeHandleRetiresOffCallerAndIsReclaimed() {
     QTRY_COMPARE(MpvCoreLease::outstandingReservations(), 0);
-    int error = 0;
-    QString message;
-    auto lease = MpvCoreLease::reserve(error, message);
-    QVERIFY2(lease, qPrintable(message));
-    // This direct native fixture bypasses the controller's locale setup.
-    QVERIFY(std::setlocale(LC_NUMERIC, "C"));
-    mpv_handle *handle = mpv_create();
-    QVERIFY(handle);
-    QCOMPARE(mpv_initialize(handle), MPV_ERROR_SUCCESS);
-    lease->publish(handle);
+    MpvCoreDiagnostic diagnostic;
+    auto lease = MpvCoreLease::reserve(diagnostic);
+    QVERIFY2(lease, qPrintable(diagnostic.message));
+    QCOMPARE(lease->initialize({{"config", "no"}}).error, MPV_ERROR_SUCCESS);
+    QVERIFY(lease->handle());
     QElapsedTimer deletion;
     deletion.start();
     lease.reset();
@@ -54,10 +48,9 @@ private slots:
   }
 
   void retiredRendererCannotReleaseReplacementOwnership() {
-    int error = 0;
-    QString message;
-    auto lease = MpvCoreLease::reserve(error, message);
-    QVERIFY2(lease, qPrintable(message));
+    MpvCoreDiagnostic diagnostic;
+    auto lease = MpvCoreLease::reserve(diagnostic);
+    QVERIFY2(lease, qPrintable(diagnostic.message));
     QVERIFY(lease->claimRenderer(1));
     QVERIFY(!lease->claimRenderer(2));
     lease->releaseRenderer(1);
