@@ -17,6 +17,20 @@ MpvPlayer {
 
 ---
 
+## Discovering the module
+
+For a build tree add the build directory to `QML_IMPORT_PATH`. For a prefix
+install add `<prefix>/<CMAKE_INSTALL_LIBDIR>/qt6/qml` if Qt does not already
+search it. `import MpvQml 1.0` does not identify the library build or imply
+`MpvFrameCapture` exists: use a pinned candidate or a release with proven
+capture capability. See [the installed pixel probe](README.md#installed-module-regression-linux).
+
+Installed C++ playback consumers use `find_package(mpvqml 0.2 CONFIG REQUIRED)`
+and link `mpvqml::mpvqml`. The package exports `mpvplayer.h` and
+`mpvcontroller_iface.h` under `mpvqml/` with their required dependencies.
+Frame capture remains QML-only; the installed source copy of its header is
+not a public C++ interface.
+
 ## Properties
 
 ### Media source

@@ -19,6 +19,7 @@ MpvQt classes are not part of the public API or runtime dependency graph.
 | Screenshots | `screenshot(mode)` or explicit caller screenshot command | Async submission; final core/file I/O retires off GUI/render threads |
 | One-shot local video frame | `MpvFrameCapture.capture` / `tryCapture` / `cancel` / `finished` / `finishedDetailed` | Worker-owned load/seek and software-frame transaction, shared native admission, bounded no-clobber staged PNG |
 | Capture backpressure | `capacityReleased(id)` / `capacityAvailable()` | Local slot release follows native cleanup and shared slot release; cancellation can settle earlier |
+| Installed discovery | QML `MpvQml`; C++ playback `mpvqml::mpvqml` | Prefix-relative plugin/backing layout and relocatable CMake export; isolated installed proof checks both surfaces, including headless timeline pixels for QML-only capture |
 | Logs | `setLogLevel` / `logMessage` | Separate helper client, barrier-safe immutable wakeup registration |
 | Hooks | `hookAdd`, `hookContinue`, `hookTriggered` | Separate helper client; hooks must be continued during ordinary operation |
 | Render parameters | `setRenderParameter("ambient-light", integer)` | Bounded snapshot coalescing and matching-context native application |

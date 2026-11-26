@@ -1,7 +1,12 @@
 #pragma once
 
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QObject>
 #include <QTemporaryDir>
+#include <QUrl>
 #include <QtQml/qqmlregistration.h>
 
 namespace MpvQmlTestSupport {
@@ -17,6 +22,14 @@ public:
     explicit TemporaryDirectory(QObject *parent = nullptr) : QObject(parent) {}
     QString path() const { return m_directory.path(); }
     bool valid() const { return m_directory.isValid(); }
+    Q_INVOKABLE bool stage(const QUrl &source, int order) const {
+        if (!valid() || !source.isLocalFile()) return false;
+        const QFileInfo input(source.toLocalFile());
+        QFile file(QDir(path()).filePath(input.fileName()));
+        return QFile::copy(input.absoluteFilePath(), file.fileName()) && file.open(QIODevice::ReadOnly)
+            && file.setFileTime(QDateTime::fromSecsSinceEpoch(1700000000 + 60LL * order),
+                                QFileDevice::FileModificationTime);
+    }
 private:
     QTemporaryDir m_directory;
 };

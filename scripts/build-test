@@ -1,22 +1,20 @@
 #!/usr/bin/env bash
-set -ex
+set -euo pipefail
 
-SCRIPTS_DIR=$(dirname "${0}")
-BUILD_DIR="build-debug"
-COVERAGE_FILE="coverage.info"
-COVERAGE_DIR="coverage_html"
+repo=$(cd -- "$(dirname -- "$0")/.." && pwd)
+build=${1:-build-debug}
+mode=${2:-}
+[[ -z $mode || $mode == --coverage ]] || { echo "Usage: $0 [build] [--coverage]" >&2; exit 2; }
+coverage=OFF
+if [[ $mode == --coverage ]]; then coverage=ON; fi
 
-# Clear out old cache states
-rm -rf ${BUILD_DIR} ${COVERAGE_FILE} ${COVERAGE_DIR}
-
-# Configure debug build with code instrumentation
-cmake -B ${BUILD_DIR} -S . \
+cmake -B "$build" -S "$repo" \
     -DCMAKE_BUILD_TYPE=Debug \
     -DBUILD_TEST_MODE=ON \
-    -DENABLE_COVERAGE=ON
+    -DENABLE_COVERAGE="$coverage"
 
 # Compile the test binaries
-cmake --build ${BUILD_DIR}
+cmake --build "$build"
 
 # Run tests
-${SCRIPTS_DIR}/run-tests ${BUILD_DIR}
+"$repo/scripts/run-tests" "$build" "$mode"

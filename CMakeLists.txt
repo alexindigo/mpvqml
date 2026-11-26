@@ -9,13 +9,38 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Baseline dependencies
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Quick OpenGL)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "mpvqml requires Linux descriptor paths and ELF loader semantics")
+endif()
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Qml Quick OpenGL)
 qt_policy(SET QTP0001 NEW)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
+pkg_check_modules(MPVQML_MPV REQUIRED IMPORTED_TARGET mpv)
+
+include(CheckCXXSourceCompiles)
+include(CMakePushCheckState)
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_LIBRARIES PkgConfig::MPVQML_MPV)
+check_cxx_source_compiles([=[
+    #include <mpv/render.h>
+    int main() {
+        mpv_render_context *context = nullptr;
+        char api[] = MPV_RENDER_API_TYPE_SW;
+        mpv_render_param params[] = {{MPV_RENDER_PARAM_API_TYPE, api}, {MPV_RENDER_PARAM_SW_SIZE, nullptr},
+            {MPV_RENDER_PARAM_SW_FORMAT, nullptr}, {MPV_RENDER_PARAM_SW_STRIDE, nullptr},
+            {MPV_RENDER_PARAM_SW_POINTER, nullptr}, {MPV_RENDER_PARAM_INVALID, nullptr}};
+        int result = mpv_render_context_create(&context, nullptr, params);
+        return result < 0 ? result : mpv_render_context_render(context, params);
+    }
+]=] MPVQML_HAS_MPV_SOFTWARE_RENDER_API)
+cmake_pop_check_state()
+if(NOT MPVQML_HAS_MPV_SOFTWARE_RENDER_API)
+    message(FATAL_ERROR "libmpv headers and library must provide the software-memory render API")
+endif()
 
 include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 # ==================== PRODUCTION QML MODULE ====================
 qt_add_qml_module(mpvqml
@@ -48,14 +73,13 @@ qt_add_qml_module(mpvqml
 
 set_target_properties(mpvqml PROPERTIES VERSION 0.2.0 SOVERSION 0.2)
 
-target_include_directories(mpvqml PUBLIC ${MPV_INCLUDE_DIRS})
 target_link_libraries(mpvqml PUBLIC
     Qt6::Core
     Qt6::Quick
     Qt6::Gui
+    PkgConfig::MPVQML_MPV
     PRIVATE
     Qt6::OpenGL
-    PkgConfig::MPV
     ${CMAKE_DL_LIBS}
 )
 
@@ -68,11 +92,8 @@ install(TARGETS mpvqml
     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    # The module plugin and backing library share the chosen prefix. Only the
-    # installed plugin needs this relative path; build-tree search stays local.
-    set_target_properties(mpvqmlplugin PROPERTIES INSTALL_RPATH "$ORIGIN/../../..")
-endif()
+# The module plugin and backing library share the chosen prefix.
+set_target_properties(mpvqmlplugin PROPERTIES INSTALL_RPATH "$ORIGIN/../../..")
 install(TARGETS mpvqmlplugin
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/qt6/qml/MpvQml
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}/qt6/qml/MpvQml
@@ -89,10 +110,20 @@ install(FILES
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mpvqml
 )
 
+set(mpvqml_cmake_dir ${CMAKE_INSTALL_LIBDIR}/cmake/mpvqml)
+configure_package_config_file(cmake/mpvqmlConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/mpvqmlConfig.cmake INSTALL_DESTINATION ${mpvqml_cmake_dir})
+write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/mpvqmlConfigVersion.cmake
+    VERSION ${PROJECT_VERSION} COMPATIBILITY SameMinorVersion)
+install(EXPORT mpvqmlTargets NAMESPACE mpvqml:: DESTINATION ${mpvqml_cmake_dir})
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/mpvqmlConfig.cmake
+              ${CMAKE_CURRENT_BINARY_DIR}/mpvqmlConfigVersion.cmake
+        DESTINATION ${mpvqml_cmake_dir})
+
 install(FILES UPSTREAM.md LICENSE LICENSES/LGPL-3.0-only.txt
     DESTINATION ${CMAKE_INSTALL_DATADIR}/mpvqml/licenses
 )
-install(FILES CMakeLists.txt README.md API.md Architecture.md UPSTREAM.md LICENSE
+install(FILES CMakeLists.txt README.md API.md Architecture.md FeatureMapping.md UPSTREAM.md LICENSE
     mpvplayer.cpp mpvplayer.h mpvcontroller_iface.h
     mpvcontroller_adapter.cpp mpvcontroller_adapter.h
     mpvlogclient.cpp mpvlogclient.h mpvhookmanager.cpp mpvhookmanager.h
@@ -103,15 +134,17 @@ install(FILES CMakeLists.txt README.md API.md Architecture.md UPSTREAM.md LICENS
     mpvframecapture.cpp mpvframecapture.h
     DESTINATION ${CMAKE_INSTALL_DATADIR}/mpvqml/source
 )
+install(FILES cmake/mpvqmlConfig.cmake.in DESTINATION ${CMAKE_INSTALL_DATADIR}/mpvqml/source/cmake)
 install(FILES LICENSES/LGPL-3.0-only.txt
     DESTINATION ${CMAKE_INSTALL_DATADIR}/mpvqml/source/LICENSES
 )
 
 # ==================== AUTOMATED TESTING TARGETS ====================
-option(BUILD_TEST_MODE "Build the internal C++ test executables" ON)
+option(BUILD_TEST_MODE "Build and register the native and QML regressions" OFF)
 
 if(BUILD_TEST_MODE)
-  find_package(Qt6 REQUIRED COMPONENTS Test Network)
+  find_package(Qt6 REQUIRED COMPONENTS Test Network QmlTools)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
   enable_language(C)
 
   # Filesystem ownership for the QML suite stays in a test-only module.
@@ -129,13 +162,12 @@ if(BUILD_TEST_MODE)
         tests/mock_mpvcontroller.cpp
     )
 
-  target_include_directories(mpvqml_cpp_tests PUBLIC ${MPV_INCLUDE_DIRS} .)
+  target_include_directories(mpvqml_cpp_tests PRIVATE .)
   target_link_libraries(mpvqml_cpp_tests PRIVATE
         mpvqml
         Qt6::Core
         Qt6::Quick
         Qt6::Test
-        PkgConfig::MPV
     )
 
   enable_testing()
@@ -151,8 +183,8 @@ if(BUILD_TEST_MODE)
 
   foreach(test_name IN ITEMS controller retirement renderer facade helpers)
     add_executable(mpvqml_${test_name}_tests tests/test_${test_name}.cpp)
-    target_include_directories(mpvqml_${test_name}_tests PRIVATE . ${MPV_INCLUDE_DIRS})
-    target_link_libraries(mpvqml_${test_name}_tests PRIVATE mpvqml Qt6::Core Qt6::Test ${MPV_LIBRARIES})
+    target_include_directories(mpvqml_${test_name}_tests PRIVATE .)
+    target_link_libraries(mpvqml_${test_name}_tests PRIVATE mpvqml Qt6::Core Qt6::Test)
     add_test(NAME mpvqml_${test_name}_tests COMMAND mpvqml_${test_name}_tests)
   endforeach()
   target_link_libraries(mpvqml_renderer_tests PRIVATE Qt6::Gui Qt6::Quick Qt6::OpenGL)
@@ -169,11 +201,11 @@ if(BUILD_TEST_MODE)
 
   add_library(mpvqml_test_faults SHARED tests/faults.c)
   set_target_properties(mpvqml_test_faults PROPERTIES AUTOMOC OFF C_STANDARD 11 C_STANDARD_REQUIRED ON)
-  target_include_directories(mpvqml_test_faults PRIVATE ${MPV_INCLUDE_DIRS})
+  target_include_directories(mpvqml_test_faults PRIVATE ${MPVQML_MPV_INCLUDE_DIRS})
   target_link_libraries(mpvqml_test_faults PRIVATE ${CMAKE_DL_LIBS} pthread)
   add_executable(mpvqml_crash_tests tests/test_crash_lifecycle.cpp)
-  target_include_directories(mpvqml_crash_tests PRIVATE . ${MPV_INCLUDE_DIRS})
-  target_link_libraries(mpvqml_crash_tests PRIVATE mpvqml Qt6::Core Qt6::Test ${MPV_LIBRARIES} ${CMAKE_DL_LIBS})
+  target_include_directories(mpvqml_crash_tests PRIVATE .)
+  target_link_libraries(mpvqml_crash_tests PRIVATE mpvqml Qt6::Core Qt6::Test ${CMAKE_DL_LIBS})
   target_compile_definitions(mpvqml_crash_tests PRIVATE MPVQML_FAULT_LIBRARY="$<TARGET_FILE:mpvqml_test_faults>")
   target_compile_definitions(mpvqml_crash_tests PRIVATE
       MPVQML_CRASH_VIDEO="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/test_one_video.mp4"
@@ -187,8 +219,8 @@ if(BUILD_TEST_MODE)
       "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/tests/unload-consumer.map")
   set_property(TARGET mpvqml_test_unload_consumer APPEND PROPERTY LINK_DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/unload-consumer.map")
-  target_include_directories(mpvqml_test_unload_consumer PRIVATE . ${MPV_INCLUDE_DIRS})
-  target_link_libraries(mpvqml_test_unload_consumer PRIVATE mpvqml Qt6::Core ${MPV_LIBRARIES})
+  target_include_directories(mpvqml_test_unload_consumer PRIVATE .)
+  target_link_libraries(mpvqml_test_unload_consumer PRIVATE mpvqml Qt6::Core)
   add_executable(mpvqml_unload_tests tests/test_unload.cpp)
   set_target_properties(mpvqml_unload_tests PROPERTIES AUTOMOC OFF)
   target_link_libraries(mpvqml_unload_tests PRIVATE Qt6::Core Qt6::Test ${CMAKE_DL_LIBS})
@@ -203,14 +235,27 @@ if(BUILD_TEST_MODE)
   add_library(mpvqml_test_lutpoison SHARED tests/lutpoison.c)
   set_target_properties(mpvqml_test_lutpoison PROPERTIES AUTOMOC OFF C_STANDARD 11 C_STANDARD_REQUIRED ON)
   add_executable(mpvqml_lut_guard_tests tests/test_lut_guard.cpp)
-  target_include_directories(mpvqml_lut_guard_tests PRIVATE . ${MPV_INCLUDE_DIRS})
+  target_include_directories(mpvqml_lut_guard_tests PRIVATE .)
   target_link_libraries(mpvqml_lut_guard_tests PRIVATE mpvqml Qt6::Core Qt6::Gui Qt6::Quick Qt6::OpenGL
-      Qt6::Test ${MPV_LIBRARIES} ${CMAKE_DL_LIBS})
+      Qt6::Test ${CMAKE_DL_LIBS})
   target_compile_definitions(mpvqml_lut_guard_tests PRIVATE
       MPVQML_TEST_VIDEO="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/test_one_video.mp4"
       MPVQML_LUT_POISON_LIBRARY="$<TARGET_FILE:mpvqml_test_lutpoison>")
   add_dependencies(mpvqml_lut_guard_tests mpvqml_test_lutpoison)
   add_test(NAME mpvqml_lut_guard_tests COMMAND mpvqml_lut_guard_tests)
+
+  add_test(NAME mpvqml_qml_tests COMMAND Qt6::qmltestrunner -import "${CMAKE_CURRENT_BINARY_DIR}"
+      -input "${CMAKE_CURRENT_SOURCE_DIR}/tests/TestPlan.qml")
+  add_test(NAME mpvqml_installed_tests COMMAND Python3::Interpreter -B
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/install-convergence.py" --build "${CMAKE_CURRENT_BINARY_DIR}" --config "$<CONFIG>")
+  set_tests_properties(mpvqml_installed_tests PROPERTIES LABELS installed RUN_SERIAL TRUE)
+  set_tests_properties(mpvqml_frame_tests mpvqml_controller_tests mpvqml_retirement_tests PROPERTIES LABELS headless)
+  set_tests_properties(mpvqml_cpp_tests PROPERTIES LABELS "native;mock")
+  set_tests_properties(mpvqml_renderer_tests mpvqml_crash_tests mpvqml_lut_guard_tests PROPERTIES LABELS "native;gl")
+  set_tests_properties(mpvqml_facade_tests mpvqml_helpers_tests PROPERTIES LABELS native)
+  set_tests_properties(mpvqml_qml_tests PROPERTIES LABELS "native;qml;gl")
+  get_property(mpvqml_tests DIRECTORY PROPERTY TESTS)
+  set_tests_properties(${mpvqml_tests} PROPERTIES FAIL_REGULAR_EXPRESSION "SKIP[ ]+:")
 endif()
 
 # ==================== THE INSTRUMENTATION MATRIX ====================

@@ -2,7 +2,7 @@
 set -ex
 
 SCRIPTS_DIR=$(dirname "${0}")
-ASSETS_DIR="${SCRIPTS_DIR}/../tests/assets"
+ASSETS_DIR=${1:-"${SCRIPTS_DIR}/../tests/assets"}
 
 mkdir -p "${ASSETS_DIR}"
 
@@ -12,6 +12,9 @@ echo "- Generating assets in ${ASSETS_DIR}"
 ffmpeg -f lavfi -i color=c=black:s=64x64:d=60 -c:v libx264 -pix_fmt yuv420p "${ASSETS_DIR}/test_main_video.mp4" -y -loglevel quiet -r 1
 ffmpeg -f lavfi -i color=c=blue:s=320x240:d=1 -c:v libx264 -pix_fmt yuv420p "${ASSETS_DIR}/test_one_video.mp4" -y -loglevel quiet
 ffmpeg -f lavfi -i color=c=red:s=640x480:d=1 -c:v libx264 -pix_fmt yuv420p "${ASSETS_DIR}/test_two_video.mp4" -y -loglevel quiet
+ffmpeg -f lavfi -i color=c=red:s=320x180:r=10:d=1 -f lavfi -i color=c=blue:s=320x180:r=10:d=1 \
+    -filter_complex '[0:v][1:v]concat=n=2:v=1:a=0' -an -c:v libvpx-vp9 -pix_fmt yuv420p \
+    "${ASSETS_DIR}/test_frame_seek.webm" -y -loglevel error
 
 # Test audio files
 ffmpeg -f lavfi -i "sine=frequency=440:duration=1" -c:a libmp3lame "${ASSETS_DIR}/test_audio1.mp3" -y -loglevel quiet

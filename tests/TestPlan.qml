@@ -10,10 +10,20 @@ TestCase {
     height: 480
 
     TemporaryDirectory { id: fixtureDirectory }
+    TemporaryDirectory { id: scanDirectory }
     WindowPolicy { id: testWindowPolicy }
+    // Oldest first. Only these files participate in directory tests; the
+    // rest of the media catalog is used by direct-load and capture tests.
+    readonly property list<string> scanFiles: [
+        "test_audio1.mp3", "test_audio2.ogg", "test_frame_seek.webm", "test_one_video.mp4",
+        "test_image2.png", "test_two_video.mp4", "test_main_video.mp4"
+    ]
 
     function initTestCase() {
         verify(fixtureDirectory.valid)
+        verify(scanDirectory.valid)
+        for (let i = 0; i < scanFiles.length; ++i)
+            verify(scanDirectory.stage(Qt.resolvedUrl("assets/" + scanFiles[i]), i), scanFiles[i])
         verify(testWindowPolicy.inputTransparent())
     }
 
@@ -262,7 +272,7 @@ TestCase {
 
     function test_12_playlist_controls() {
         player.clearPlaylist()
-        player.loadDirectory(Qt.resolvedUrl("assets/").toString(), ["*.mp4"], "replace", "name")
+        player.loadDirectory(scanDirectory.path, ["*.mp4"], "replace", "name")
         tryCompare(player.playlist, "length", 3, 2000)
 
         player.next()
@@ -352,34 +362,34 @@ TestCase {
     }
 
     function test_21_directory_audio_filtering_guards() {
-        player.loadDirectory(Qt.resolvedUrl("assets/").toString(), ["*.ogg"], "replace", "size")
+        player.loadDirectory(scanDirectory.path, ["*.ogg"], "replace", "size")
         tryCompare(player.playlist, "length", 1, 2000)
         verify(player.playlist[0].filename.endsWith("test_audio2.ogg"))
     }
 
     function test_22_directory_image_filtering_guards() {
-        player.loadDirectory(Qt.resolvedUrl("assets/").toString(), ["*.png"], "replace", "name")
+        player.loadDirectory(scanDirectory.path, ["*.png"], "replace", "name")
         tryCompare(player.playlist, "length", 1, 2000)
         verify(player.playlist[0].filename.endsWith("test_image2.png"))
     }
 
-    // Scenario 23: fallback extensions whitelists and sorting
-        function test_23_directory_fallback_filters_and_time_sort() {
-            // Pass an empty extension array to trip the default fallback scanner block
-            player.loadDirectory(Qt.resolvedUrl("assets/").toString(), [], "replace", "date")
-
-            // Update expected value to 4 to match the C++ whitelisted file count
-            tryCompare(player.playlist, "length", 4, 2000)
-        }
+    function test_23_directory_fallback_filters_and_time_sort() {
+        const expected = ["test_main_video.mp4", "test_two_video.mp4", "test_one_video.mp4",
+                          "test_frame_seek.webm", "test_audio1.mp3"]
+        player.loadDirectory(scanDirectory.path, [], "replace", "date")
+        tryCompare(player.playlist, "length", expected.length, 2000)
+        for (let i = 0; i < expected.length; ++i)
+            verify(player.playlist[i].filename.endsWith("/" + expected[i]), player.playlist[i].filename)
+    }
 
     // Targets short-circuit return statements inside directory validation layers
     function test_24_directory_invalid_path_bounces() {
-        player.loadDirectory(Qt.resolvedUrl("assets/non_existent_folder_simulation").toString(), [], "replace", "name")
+        player.loadDirectory(scanDirectory.path + "/nonexistent", [], "replace", "name")
         compare(player.playlist.length, 0)
     }
 
     function test_25_clear_playlist_stop_false_path() {
-        player.loadDirectory(Qt.resolvedUrl("assets/").toString(), ["*.mp4"], "replace", "name")
+        player.loadDirectory(scanDirectory.path, ["*.mp4"], "replace", "name")
         tryCompare(player.playlist, "length", 3, 2000)
 
         player.next()
@@ -393,7 +403,7 @@ TestCase {
     }
 
     function test_26_clear_playlist_stop_true_path() {
-        player.loadDirectory(Qt.resolvedUrl("assets/").toString(), ["*.mp4"], "replace", "name")
+        player.loadDirectory(scanDirectory.path, ["*.mp4"], "replace", "name")
         tryCompare(player.playlist, "length", 3, 2000)
 
         player.next()
@@ -442,7 +452,7 @@ TestCase {
 
     function test_31_directory_playlist_append_play_branch() {
         player.clearPlaylist()
-        player.loadDirectory(Qt.resolvedUrl("assets/").toString(), ["*.mp4"], "replace", "name")
+        player.loadDirectory(scanDirectory.path, ["*.mp4"], "replace", "name")
         tryCompare(player.playlist, "length", 3, 2000)
     }
 
@@ -486,7 +496,7 @@ TestCase {
         player.selectTrack("audio", 0) // track disabling ("no")
 
         // We pass a valid folder path but use a fake filter array to force an empty return
-        player.loadDirectory(Qt.resolvedUrl("assets/").toString(), ["*.fake_mismatch_pattern"], "replace", "name")
+        player.loadDirectory(scanDirectory.path, ["*.fake_mismatch_pattern"], "replace", "name")
 
         // By supplying actual commands, we pass the isEmpty() guard checks and execute the code blocks
         player.runExternalProcess(["echo", "test"])

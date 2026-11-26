@@ -189,8 +189,16 @@ replacing aliases or competing writers, then retires the temporary name.
 The guiless suite observes real first/seek pixels through the registered QML
 type; isolated fault children hold native and publication boundaries.
 
-See `UPSTREAM.md` for pinned derivation/notices and `API.md` for the consumer
-contract. Existing suites plus controller, renderer, facade, helper, retirement,
-child-scoped crash and LUT-guard targets are registered with CTest. Native rendered cases
-observe consumer pixels, retained state and reclamation; mock readiness is only
-unit-seam evidence. Build/test execution belongs in the owned project feature VM.
+The installed plugin resolves the backing library relative to its own prefix.
+C++ playback consumers discover the backing library via `mpvqml::mpvqml`, whose
+public dependencies include the native headers used by the interface seam.
+QML capture uses plugin discovery instead of a C++ link. Relocation is tested
+with both original trees denied: the external project links only the exported
+target, and a distinct no-display process imports the installed type and
+checks decoded pixels and mapped DSOs.
+
+See `UPSTREAM.md` for pinned derivation/notices, `API.md` for discovery and
+consumer contracts, and `tests/README.md` for fixture and lane ownership.
+Native rendered cases observe consumer pixels, retained state and reclamation;
+mock readiness is only unit-seam evidence. Build/test execution belongs in
+the owned project feature VM.
