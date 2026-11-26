@@ -6,7 +6,7 @@ MpvQt classes are not part of the public API or runtime dependency graph.
 
 | libmpv area | Consumer surface | Owning implementation |
 |---|---|---|
-| Core creation/initialization | `coreAvailable`, initialization result/failure | Private worker/controller; unpublished candidates disposed on failure |
+| Core creation/initialization | `coreAvailable`, initialization result/failure | Shared native permit owns creation, stage/code and unpublished cleanup; worker/controller supplies playback options |
 | Rendering | `rendererReady`, `ready`, render result/failure | Private synchronized FBO renderer; OpenGL only |
 | Media load/navigation/playlist | Typed methods/properties in API.md | GUI intent/deferred-load handling, then queued interface commands |
 | Typed property writes | Writable Q_PROPERTY setters | GUI dirty/pending/revision pipeline, then queued interface writes |
@@ -16,7 +16,8 @@ MpvQt classes are not part of the public API or runtime dependency graph.
 | Generic commands/results | `commandAsync(params)` / `asyncCommandFinished(id, error, result)` | `mpv_command_node_async`, immediate input cleanup, owned native result copies |
 | Configuration files | `loadConfigFile(path)` | Worker-affine native loading; operation failures reported to the facade |
 | Screenshots | `screenshot(mode)` or explicit caller screenshot command | Async submission; final core/file I/O retires off GUI/render threads |
-| One-shot local video frame | `MpvFrameCapture.capture` / `cancel` / `finished` | Separate worker-owned software render context, shared native admission, bounded staged PNG |
+| One-shot local video frame | `MpvFrameCapture.capture` / `tryCapture` / `cancel` / `finished` | Separate worker-owned software render context, shared native admission, bounded staged PNG |
+| Capture backpressure | `capacityReleased(id)` / `capacityAvailable()` | Local slot release follows native cleanup and shared slot release; cancellation can settle earlier |
 | Logs | `setLogLevel` / `logMessage` | Separate helper client, barrier-safe immutable wakeup registration |
 | Hooks | `hookAdd`, `hookContinue`, `hookTriggered` | Separate helper client; hooks must be continued during ordinary operation |
 | Render parameters | `setRenderParameter("ambient-light", integer)` | Bounded snapshot coalescing and matching-context native application |

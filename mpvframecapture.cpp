@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "mpvframecapture.h"
-#include "mpvcorebootstrap_p.h"
-#include "mpvrenderbridge_p.h"
+#include "mpvbackendcore_p.h"
 
 #include <QFile>
 #include <QImage>
+#include <QPointer>
 #include <QSaveFile>
 #include <QSize>
 #include <array>
@@ -14,11 +14,13 @@
 #include <fcntl.h>
 #include <limits>
 #include <mutex>
+#include <mpv/render.h>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 
 namespace {
+using namespace MpvQmlPrivate;
 using Clock = std::chrono::steady_clock;
 constexpr auto CaptureBudget = std::chrono::seconds(7);
 constexpr int MaxEdge = 4096;
@@ -143,6 +145,12 @@ struct MpvFrameCapture::Dispatch {
   MpvFrameCapture *receiver = nullptr; // Read only under lock off the object's thread.
 };
 
+struct MpvFrameCapture::Admission {
+  AdmissionStatus status;
+  int result; // positive ID or legacy negative error
+  QString reason;
+};
+
 struct MpvFrameCapture::Job {
   int id;
   QString source;
@@ -152,19 +160,14 @@ struct MpvFrameCapture::Job {
   Clock::time_point deadline;
   std::atomic<Phase> phase{Phase::Working};
 
-  Result run() {
+  Result run(MpvBackendCore &core, Input &input) {
     if (phase.load() != Phase::Working)
       return {};
-    Input input{::open(QFile::encodeName(source).constData(), O_RDONLY | O_CLOEXEC | O_NONBLOCK)};
+    input.fd = ::open(QFile::encodeName(source).constData(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
     struct stat info {};
     if (input.fd < 0 || ::fstat(input.fd, &info) != 0 || !S_ISREG(info.st_mode))
       return {QStringLiteral("unreadable"), QStringLiteral("Cannot open a readable regular video file")};
-    // Keep this descriptor alive through mpv_terminate_destroy; fd:// never
-    // reopens a path and allows mpv to sniff the container without its suffix.
-    std::unique_ptr<mpv_handle, decltype(&mpv_terminate_destroy)> mpv(MpvQmlPrivate::createMpvCore(), mpv_terminate_destroy);
-    if (!mpv)
-      return {QStringLiteral("initialization-failed"), QStringLiteral("Cannot create an mpv client")};
-    const std::pair<const char *, const char *> options[] = {
+    const auto diagnostic = core.initialize({
         {"config", "no"}, {"terminal", "no"}, {"load-scripts", "no"},
         {"ytdl", "no"}, {"access-references", "no"}, {"vo", "libmpv"},
         {"aid", "no"}, {"sid", "no"}, {"audio-file-auto", "no"}, {"sub-auto", "no"},
@@ -173,24 +176,19 @@ struct MpvFrameCapture::Job {
         // bounds. 64 MiPixels also admits 8K UHD sources.
         {"vd-lavc-o", "max_pixels=67108864"}, {"cache", "no"},
         {"osd-level", "0"}, {"osc", "no"}, {"load-stats-overlay", "no"},
-        {"load-osd-console", "no"}, {"load-auto-profiles", "no"}};
-    for (auto [name, value] : options) {
-      const int error = mpv_set_option_string(mpv.get(), name, value);
-      if (error < 0)
-        return {QStringLiteral("initialization-failed"), QString::fromLatin1(name) + ": " + mpv_error_string(error)};
-    }
-    int error = mpv_initialize(mpv.get());
-    if (error < 0)
-      return mpvFailure(QStringLiteral("initialization-failed"), error);
+        {"load-osd-console", "no"}, {"load-auto-profiles", "no"}});
+    if (diagnostic.error < 0)
+      return {QStringLiteral("initialization-failed"), diagnostic.message};
+    auto *mpv = core.handle();
     mpv_render_context *context = nullptr;
     char api[] = MPV_RENDER_API_TYPE_SW;
     mpv_render_param params[] = {{MPV_RENDER_PARAM_API_TYPE, api}, {MPV_RENDER_PARAM_INVALID, nullptr}};
-    error = mpv_render_context_create(&context, mpv.get(), params);
+    const int error = mpv_render_context_create(&context, mpv, params);
     if (error < 0)
       return mpvFailure(QStringLiteral("initialization-failed"), error);
     std::unique_ptr<mpv_render_context, decltype(&mpv_render_context_free)> render(context, mpv_render_context_free);
     QImage image;
-    auto result = readFrame(mpv.get(), render.get(), QByteArray("fd://") + QByteArray::number(input.fd),
+    auto result = readFrame(mpv, render.get(), QByteArray("fd://") + QByteArray::number(input.fd),
                             fraction, bounds, phase, deadline, image);
     if (!result.code.isEmpty() || phase.load() != Phase::Working)
       return result;
@@ -215,7 +213,7 @@ MpvFrameCapture::MpvFrameCapture(QObject *parent)
 }
 
 MpvFrameCapture::~MpvFrameCapture() {
-  for (const auto &job : std::as_const(m_jobs)) {
+  for (const auto &job : std::as_const(m_activeJobs)) {
     Phase working = Phase::Working;
     job->phase.compare_exchange_strong(working, Phase::Cancelled);
   }
@@ -225,46 +223,85 @@ MpvFrameCapture::~MpvFrameCapture() {
 
 int MpvFrameCapture::capture(const QUrl &source, double fraction, int maxWidth, int maxHeight,
                             const QUrl &destination) {
-  if (!isFileUrl(source) || !isFileUrl(destination) || source == destination
-      || !std::isfinite(fraction) || fraction < 0 || fraction >= 1
-      || maxWidth < 1 || maxHeight < 1 || maxWidth > MaxEdge || maxHeight > MaxEdge)
-    return MPV_ERROR_INVALID_PARAMETER;
-  if (m_jobs.size() >= MaxJobs || m_lastId == std::numeric_limits<int>::max())
-    return MPV_ERROR_EVENT_QUEUE_FULL;
+  return admit(source, fraction, maxWidth, maxHeight, destination).result;
+}
 
-  int error = 0;
-  QString reason;
-  // Reuse the player's global native admission budget and DSO pin. A capture
-  // reserves a slot through native destruction, even if its owner disappears.
-  auto lease = MpvQmlPrivate::MpvCoreLease::reserve(error, reason);
-  if (!lease)
-    return error;
+QVariantMap MpvFrameCapture::tryCapture(const QUrl &source, double fraction, int maxWidth, int maxHeight,
+                                        const QUrl &destination) {
+  const auto admission = admit(source, fraction, maxWidth, maxHeight, destination);
+  return {{QStringLiteral("status"), int(admission.status)},
+          {QStringLiteral("id"), admission.status == Accepted ? admission.result : 0},
+          {QStringLiteral("error"), admission.status == Accepted ? MPV_ERROR_SUCCESS : admission.result},
+          {QStringLiteral("reason"), admission.reason}};
+}
+
+bool MpvFrameCapture::capacityAvailable() const {
+  return m_lastId < std::numeric_limits<int>::max() && m_activeJobs.size() < MaxJobs
+      && MpvBackendCore::hasCapacity();
+}
+
+MpvFrameCapture::Admission MpvFrameCapture::admit(const QUrl &source, double fraction,
+                                                 int maxWidth, int maxHeight, const QUrl &destination) {
+  if (!isFileUrl(source) || !isFileUrl(destination) || source == destination
+       || !std::isfinite(fraction) || fraction < 0 || fraction >= 1
+       || maxWidth < 1 || maxHeight < 1 || maxWidth > MaxEdge || maxHeight > MaxEdge)
+    return {InvalidArguments, MPV_ERROR_INVALID_PARAMETER, QStringLiteral("Invalid capture arguments")};
+  if (m_lastId == std::numeric_limits<int>::max())
+    return {IdExhausted, MPV_ERROR_EVENT_QUEUE_FULL, QStringLiteral("Capture request IDs are exhausted")};
+  if (m_activeJobs.size() >= MaxJobs)
+    return {LocalBusy, MPV_ERROR_EVENT_QUEUE_FULL, QStringLiteral("All local capture slots are occupied")};
+
+  MpvCoreDiagnostic diagnostic;
+  auto permit = MpvBackendCore::reserve(MpvBackendCore::Retirement::Exclusive, diagnostic);
+  if (!permit) {
+    const auto status = diagnostic.stage == MpvCoreStage::Capacity ? SharedBusy
+        : diagnostic.stage == MpvCoreStage::Allocation ? AllocationFailed : BackendUnavailable;
+    return {status, diagnostic.error, diagnostic.message};
+  }
   const int id = ++m_lastId;
-  auto job = std::shared_ptr<Job>(new Job{id, source.toLocalFile(), destination.toLocalFile(), fraction,
-      QSize(maxWidth, maxHeight), Clock::now() + CaptureBudget});
-  m_jobs.insert(id, job);
   try {
-    std::thread([job, dispatch = m_dispatch, lease = std::move(lease)] {
-      auto result = job->run();
+    auto job = std::shared_ptr<Job>(new Job{id, source.toLocalFile(), destination.toLocalFile(), fraction,
+        QSize(maxWidth, maxHeight), Clock::now() + CaptureBudget});
+    m_activeJobs.insert(id, job);
+    std::thread([job, dispatch = m_dispatch, permit = std::move(permit)]() mutable {
+      Result result;
+      {
+        Input input;
+        result = job->run(*permit, input);
+        // The render context is gone, but fd:// still needs its input descriptor
+        // through final native teardown. Release both before announcing capacity.
+        permit->finishExclusive();
+      }
+      permit.reset();
       std::lock_guard lock(dispatch->lock);
       auto *receiver = dispatch->receiver;
       if (receiver)
         QMetaObject::invokeMethod(receiver, [receiver, job, result = std::move(result)] {
-          if (!receiver->m_jobs.remove(job->id))
-            return;
-          if (job->phase.load() != Phase::Cancelled)
-            emit receiver->finished(job->id, result.code, result.reason);
+          receiver->retired(job, result.code, result.reason);
         }, Qt::QueuedConnection);
     }).detach();
+  } catch (const std::bad_alloc &) {
+    m_activeJobs.remove(id);
+    return {AllocationFailed, MPV_ERROR_NOMEM, QStringLiteral("Cannot allocate capture job ownership")};
   } catch (const std::system_error &) {
-    m_jobs.remove(id);
-    return MPV_ERROR_GENERIC;
+    m_activeJobs.remove(id);
+    return {WorkerUnavailable, MPV_ERROR_GENERIC, QStringLiteral("Cannot start capture worker")};
   }
-  return id;
+  return {Accepted, id, {}};
+}
+
+void MpvFrameCapture::retired(const std::shared_ptr<Job> &job, const QString &code, const QString &reason) {
+  if (!m_activeJobs.remove(job->id))
+    return;
+  const QPointer<MpvFrameCapture> guard(this);
+  if (job->phase.load() != Phase::Cancelled)
+    emit finished(job->id, code, reason);
+  if (guard)
+    emit capacityReleased(job->id);
 }
 
 bool MpvFrameCapture::cancel(int id) {
-  auto job = m_jobs.value(id);
+  auto job = m_activeJobs.value(id);
   Phase working = Phase::Working;
   if (!job || !job->phase.compare_exchange_strong(working, Phase::Cancelled))
     return false;

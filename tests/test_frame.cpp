@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include <QFile>
 #include <QImage>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QSignalSpy>
@@ -36,23 +38,52 @@ private slots:
     QVERIFY(scratch.isValid());
     engine.addImportPath(QStringLiteral(TEST_IMPORT_PATH));
     QQmlComponent component(&engine);
-    component.setData("import MpvQml\nMpvFrameCapture {}", QUrl());
+    component.setData("import MpvQml\n"
+                      "MpvFrameCapture {\n"
+                      "  function hasCapacity(): bool { return capacityAvailable() }\n"
+                      "  function reportsInvalidArguments(): bool {\n"
+                      "    const result = tryCapture('https://example.invalid/video', 0, 64, 64, 'file:///staging/frame.png')\n"
+                      "    return result.status === MpvFrameCapture.InvalidArguments && result.id === 0 && result.error < 0\n"
+                      "  }\n"
+                      "}\n", QUrl());
     QVERIFY2(component.isReady(), qPrintable(component.errorString()));
     capture.reset(component.create());
     QVERIFY(capture);
   }
 
+  void exposesTypedAdmissionInQml() {
+    bool value = false;
+    QVERIFY(QMetaObject::invokeMethod(capture.get(), "hasCapacity", Q_RETURN_ARG(bool, value)));
+    QVERIFY(value);
+    QVERIFY(QMetaObject::invokeMethod(capture.get(), "reportsInvalidArguments", Q_RETURN_ARG(bool, value)));
+    QVERIFY(value);
+  }
+
   void capturesUnderNonCNumericLocale() {
-    const QByteArray original(std::setlocale(LC_NUMERIC, nullptr));
+    if (!qEnvironmentVariableIsSet("MPVQML_NON_C_TEST_CHILD")) {
+      QProcess child;
+      auto environment = QProcessEnvironment::systemEnvironment();
+      environment.insert("MPVQML_NON_C_TEST_CHILD", "1");
+      child.setProcessEnvironment(environment);
+      child.setProcessChannelMode(QProcess::MergedChannels);
+      child.start(QCoreApplication::applicationFilePath(), {"capturesUnderNonCNumericLocale"});
+      QVERIFY(child.waitForStarted(5000));
+      if (!child.waitForFinished(15000)) {
+        child.kill();
+        child.waitForFinished(5000);
+        QFAIL("Mandatory non-C locale child timed out");
+      }
+      const auto output = child.readAll();
+      qInfo().noquote() << output;
+      QCOMPARE(child.exitStatus(), QProcess::NormalExit);
+      QCOMPARE(child.exitCode(), 0);
+      QVERIFY(output.contains("NON_C_CAPTURE_EXERCISED"));
+      return;
+    }
     const char *selected = std::setlocale(LC_NUMERIC, "en_US.UTF-8");
     if (!selected)
       selected = std::setlocale(LC_NUMERIC, "de_DE.UTF-8");
-    if (!selected)
-      QSKIP("No en_US.UTF-8 or de_DE.UTF-8 locale installed");
-    struct RestoreLocale {
-      QByteArray name;
-      ~RestoreLocale() { std::setlocale(LC_NUMERIC, name.constData()); }
-    } restore{original};
+    QVERIFY2(selected, "Install en_US.UTF-8 or de_DE.UTF-8 for mandatory non-C coverage");
     const QByteArray active(std::setlocale(LC_NUMERIC, nullptr));
     QVERIFY(!active.isEmpty() && active != "C" && active != "C.UTF-8");
     qInfo() << "Starting headless capture with LC_NUMERIC" << active;
@@ -69,6 +100,8 @@ private slots:
     QCOMPARE(image.size(), QSize(123, 69));
     const auto pixel = image.pixelColor(image.width() / 2, image.height() / 2);
     QVERIFY2(pixel.blue() > 210 && pixel.red() < 30, qPrintable(pixel.name()));
+    QCOMPARE(QByteArray(std::setlocale(LC_NUMERIC, nullptr)), QByteArray("C"));
+    qInfo() << "NON_C_CAPTURE_EXERCISED";
   }
 
   void choosesRequestedFrame_data() {

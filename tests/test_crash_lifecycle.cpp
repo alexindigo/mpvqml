@@ -1,5 +1,6 @@
 #include "faults.h"
 #include "mpvcontroller_p.h"
+#include "mpvframecapture.h"
 #include "mpvplayer.h"
 #include "test_window.h"
 
@@ -72,6 +73,8 @@ private slots:
     int failThread = 0;
     if (fixtureName == "coreCreationFailure") flags = FaultCreate;
     if (fixtureName == "coreInitializationFailure") flags = FaultInitialize;
+    if (fixtureName == "captureInitializationFailure") flags = FaultInitialize;
+    if (fixtureName == "captureSuccessReusesReleasedSlot") flags = FaultRetirementBarrier;
     if (fixtureName == "partialRetirementBootstrapFailure") failThread = 2;
     if (fixtureName == "workerStartupFailure") failThread = 3;
     if (fixtureName == "bothWorkersBlockedAndAllLiveLeasesReclaimed"
@@ -99,6 +102,7 @@ private slots:
       QVERIFY(result.attempted);
       QVERIFY(!result.success);
       QCOMPARE(result.error, MPV_ERROR_GENERIC);
+      QCOMPARE(result.coreStage, MpvCoreStage::Create);
       QVERIFY(result.message.contains("creation failed"));
       QVERIFY(!worker.core()->handle());
       QVERIFY(!worker.post([](MpvController *) {}));
@@ -121,6 +125,7 @@ private slots:
       const auto result = worker.initialize();
       QVERIFY(result.attempted && !result.success);
       QCOMPARE(result.error, MPV_ERROR_INVALID_PARAMETER);
+      QCOMPARE(result.coreStage, MpvCoreStage::Initialize);
       QCOMPARE(result.message, QString::fromUtf8(mpv_error_string(MPV_ERROR_INVALID_PARAMETER)));
       QVERIFY(!worker.core()->handle());
       QVERIFY(!worker.post([](MpvController *) {}));
@@ -135,13 +140,128 @@ private slots:
     exercised();
   }
 
+  void captureInitializationFailure() {
+    QTemporaryDir stage;
+    QVERIFY(stage.isValid());
+    MpvFrameCapture capture;
+    QSignalSpy replies(&capture, &MpvFrameCapture::finished);
+    const auto target = QUrl::fromLocalFile(stage.filePath("frame.png"));
+    const int id = capture.capture(QUrl::fromLocalFile(MPVQML_CRASH_VIDEO), 0, 64, 64, target);
+    QVERIFY(id > 0);
+    QTRY_COMPARE(replies.size(), 1);
+    QCOMPARE(replies[0][0].toInt(), id);
+    QCOMPARE(replies[0][1].toString(), QStringLiteral("initialization-failed"));
+    QVERIFY(!QFile::exists(target.toLocalFile()));
+    QCOMPARE(faults.counter(FaultCreates), 1L);
+    QCOMPARE(faults.counter(FaultInitializes), 1L);
+    QCOMPARE(faults.counter(FaultCandidateDestroys), 1L);
+    QCOMPARE(faults.counter(FaultRetirementEntered), 0L);
+    exercised();
+  }
+
+  void mixedAdmissionHoldsCancelledSlots() {
+    QTemporaryDir stage;
+    QVERIFY(stage.isValid());
+    MpvBackendWorker playback;
+    QVERIFY(playback.initialize().success);
+    MpvCoreDiagnostic diagnostic;
+    std::array<std::shared_ptr<MpvCoreLease>, MpvBackendCore::Capacity - 3> otherPlayback;
+    for (auto &lease : otherPlayback) {
+      lease = MpvCoreLease::reserve(diagnostic);
+      QVERIFY2(lease, qPrintable(diagnostic.message));
+    }
+    MpvFrameCapture capture, other;
+    QSignalSpy replies(&capture, &MpvFrameCapture::finished);
+    QSignalSpy capacity(&capture, &MpvFrameCapture::capacityReleased);
+    ReleaseBarrier barrier;
+    faults.configure(FaultInitializeBarrier, 0);
+    const auto source = QUrl::fromLocalFile(MPVQML_CRASH_VIDEO);
+    const auto a = QUrl::fromLocalFile(stage.filePath("a.png"));
+    const auto b = QUrl::fromLocalFile(stage.filePath("b.png"));
+    const auto c = QUrl::fromLocalFile(stage.filePath("c.png"));
+    const int first = capture.capture(source, 0, 64, 64, a);
+    const int second = capture.capture(source, 0, 64, 64, b);
+    QVERIFY(first > 0 && second > first);
+    QTRY_COMPARE(faults.counter(FaultInitializeEntered), 2L);
+    QVERIFY(capture.cancel(first));
+    QVERIFY(!capture.cancel(first));
+    QVERIFY(capture.cancel(second));
+    QTRY_COMPARE(replies.size(), 2);
+    QCOMPARE(replies[0][0].toInt(), first);
+    QCOMPARE(replies[0][1].toString(), QStringLiteral("cancelled"));
+    QCOMPARE(replies[1][0].toInt(), second);
+    QCOMPARE(replies[1][1].toString(), QStringLiteral("cancelled"));
+    QVERIFY(capacity.isEmpty());
+    QVERIFY(!capture.capacityAvailable());
+    QVERIFY(!other.capacityAvailable());
+    QCOMPARE(capture.tryCapture(source, 0, 64, 64, c)["status"].toInt(), int(MpvFrameCapture::LocalBusy));
+    const auto rejected = other.tryCapture(source, 0, 64, 64, c);
+    QCOMPARE(rejected["status"].toInt(), int(MpvFrameCapture::SharedBusy));
+    QCOMPARE(rejected["id"].toInt(), 0);
+    QCOMPARE(rejected["error"].toInt(), MPV_ERROR_NOMEM);
+    QCOMPARE(other.capture(source, 0, 64, 64, c), MPV_ERROR_NOMEM);
+    MpvBackendWorker refusedPlayback;
+    QCOMPARE(refusedPlayback.initialize().coreStage, MpvCoreStage::Capacity);
+    QCOMPARE(MpvBackendCore::outstandingReservations(), MpvBackendCore::Capacity);
+    faults.release();
+    QTRY_COMPARE(capacity.size(), 2);
+    QCOMPARE(replies.size(), 2);
+    QCOMPARE(faults.counter(FaultRetirementCompleted), 2L);
+    QVERIFY(capture.capacityAvailable());
+    QVERIFY(other.capacityAvailable());
+    QVERIFY(!QFile::exists(a.toLocalFile()) && !QFile::exists(b.toLocalFile()));
+    exercised();
+  }
+
+  void captureSuccessReusesReleasedSlot() {
+    QTemporaryDir stage;
+    QVERIFY(stage.isValid());
+    MpvCoreDiagnostic diagnostic;
+    std::array<std::shared_ptr<MpvCoreLease>, MpvBackendCore::Capacity - 1> playback;
+    for (auto &lease : playback) {
+      lease = MpvCoreLease::reserve(diagnostic);
+      QVERIFY2(lease, qPrintable(diagnostic.message));
+    }
+    MpvFrameCapture capture;
+    QSignalSpy replies(&capture, &MpvFrameCapture::finished);
+    QSignalSpy capacity(&capture, &MpvFrameCapture::capacityReleased);
+    ReleaseBarrier barrier;
+    const auto source = QUrl::fromLocalFile(MPVQML_CRASH_VIDEO);
+    const auto a = QUrl::fromLocalFile(stage.filePath("a.png"));
+    const auto b = QUrl::fromLocalFile(stage.filePath("b.png"));
+    const int first = capture.capture(source, 0, 64, 64, a);
+    QVERIFY(first > 0);
+    int second = 0;
+    connect(&capture, &MpvFrameCapture::finished, &capture, [&](int id, const QString &code) {
+      if (id != first || !code.isEmpty())
+        return;
+      QVERIFY(capture.capacityAvailable());
+      second = capture.capture(source, 0, 64, 64, b);
+    });
+    QTRY_COMPARE(faults.counter(FaultRetirementEntered), 1L);
+    QVERIFY(QFile::exists(a.toLocalFile()));
+    QVERIFY(replies.isEmpty());
+    QVERIFY(capacity.isEmpty());
+    QVERIFY(!capture.capacityAvailable());
+    faults.release();
+    QTRY_COMPARE(replies.size(), 2);
+    QVERIFY(second > first);
+    QCOMPARE(replies[1][0].toInt(), second);
+    QVERIFY2(replies[1][1].toString().isEmpty(), qPrintable(replies[1][2].toString()));
+    QCOMPARE(capacity.size(), 2);
+    QCOMPARE(faults.counter(FaultRetirementCompleted), 2L);
+    const QImage firstFrame(a.toLocalFile()), secondFrame(b.toLocalFile());
+    QVERIFY(!firstFrame.isNull() && firstFrame == secondFrame);
+    exercised();
+  }
+
   void partialRetirementBootstrapFailure() {
-    int error = 0;
-    QString message;
-    auto lease = MpvCoreLease::reserve(error, message);
+    MpvCoreDiagnostic diagnostic;
+    auto lease = MpvCoreLease::reserve(diagnostic);
     QVERIFY(!lease);
-    QCOMPARE(error, MPV_ERROR_GENERIC);
-    QVERIFY(message.contains("retirement worker"));
+    QCOMPARE(diagnostic.error, MPV_ERROR_GENERIC);
+    QCOMPARE(diagnostic.stage, MpvCoreStage::Service);
+    QVERIFY(diagnostic.message.contains("retirement worker"));
     QCOMPARE(MpvCoreLease::outstandingReservations(), 0);
     QCOMPARE(faults.counter(FaultThreadAttempts), 2L);
     QCOMPARE(faults.counter(FaultThreadFailures), 1L);
@@ -176,17 +296,13 @@ private slots:
 
   void bothWorkersBlockedAndAllLiveLeasesReclaimed() {
     ReleaseBarrier barrier;
-    std::array<std::shared_ptr<MpvCoreLease>, 32> leases;
+    std::array<std::shared_ptr<MpvCoreLease>, MpvBackendCore::Capacity> leases;
+    MpvCoreDiagnostic diagnostic;
     for (auto &lease : leases) {
-      int error = 0;
-      QString message;
-      lease = MpvCoreLease::reserve(error, message);
-      QVERIFY2(lease, qPrintable(message));
-      std::unique_ptr<mpv_handle, decltype(&mpv_destroy)> candidate(mpv_create(), mpv_destroy);
-      QVERIFY(candidate);
-      QCOMPARE(mpv_set_option_string(candidate.get(), "config", "no"), MPV_ERROR_SUCCESS);
-      QCOMPARE(mpv_initialize(candidate.get()), MPV_ERROR_SUCCESS);
-      lease->publish(candidate.release());
+      lease = MpvCoreLease::reserve(diagnostic);
+      QVERIFY2(lease, qPrintable(diagnostic.message));
+      diagnostic = lease->initialize({{"config", "no"}});
+      QCOMPARE(diagnostic.error, MPV_ERROR_SUCCESS);
     }
     QCOMPARE(faults.counter(FaultCreates), 32L);
     QCOMPARE(faults.counter(FaultInitializes), 32L);
@@ -203,20 +319,18 @@ private slots:
     connect(&timer, &QTimer::timeout, this, [&heartbeat]() { ++heartbeat; });
     timer.start(5);
     QTRY_VERIFY_WITH_TIMEOUT(heartbeat >= 3, 1000);
-    int error = 0;
-    QString message;
-    auto refused = MpvCoreLease::reserve(error, message);
+    auto refused = MpvCoreLease::reserve(diagnostic);
     QVERIFY(!refused);
-    QCOMPARE(error, MPV_ERROR_NOMEM);
-    QVERIFY(message.contains("32"));
+    QCOMPARE(diagnostic.error, MPV_ERROR_NOMEM);
+    QCOMPARE(diagnostic.stage, MpvCoreStage::Capacity);
     QCOMPARE(faults.counter(FaultRetirementEntered), 2L);
     QCOMPARE(faults.counter(FaultRetirementCompleted), 0L);
     faults.release();
     QTRY_COMPARE_WITH_TIMEOUT(faults.counter(FaultRetirementCompleted), 32L, 10000);
     QTRY_COMPARE_WITH_TIMEOUT(MpvCoreLease::outstandingReservations(), 0, 5000);
-    auto accepted = MpvCoreLease::reserve(error, message);
-    QVERIFY2(accepted, qPrintable(message));
-    QCOMPARE(error, MPV_ERROR_SUCCESS);
+    auto accepted = MpvCoreLease::reserve(diagnostic);
+    QVERIFY2(accepted, qPrintable(diagnostic.message));
+    QCOMPARE(diagnostic.error, MPV_ERROR_SUCCESS);
     accepted.reset();
     QCOMPARE(MpvCoreLease::outstandingReservations(), 0);
     qInfo() << "32 native retirements completed; heartbeat ticks" << heartbeat
@@ -658,7 +772,8 @@ class TestCrashLifecycle : public QObject {
 private slots:
   void nativeFaults_data() {
     QTest::addColumn<QString>("name");
-    for (const char *name : {"coreCreationFailure", "coreInitializationFailure",
+    for (const char *name : {"coreCreationFailure", "coreInitializationFailure", "captureInitializationFailure",
+                            "mixedAdmissionHoldsCancelledSlots", "captureSuccessReusesReleasedSlot",
                             "partialRetirementBootstrapFailure", "workerStartupFailure",
                             "bothWorkersBlockedAndAllLiveLeasesReclaimed", "workerTlsCleanupOutlivesFacade",
                             "moduleUnloadWhileBlocked", "publicCoreCreationFailure",
@@ -692,6 +807,12 @@ private slots:
 #endif
     environment.insert("LD_PRELOAD", preload);
     environment.insert("QT_FORCE_STDERR_LOGGING", "1");
+    if (name.startsWith("capture") || name == "mixedAdmissionHoldsCancelledSlots") {
+      environment.remove("DISPLAY");
+      environment.remove("WAYLAND_DISPLAY");
+      environment.insert("QT_QPA_PLATFORM", "offscreen");
+      environment.insert("QT_QUICK_BACKEND", "software");
+    }
     child.setProcessEnvironment(environment);
     child.setProcessChannelMode(QProcess::MergedChannels);
     const QString executable = name == QStringLiteral("moduleUnloadWhileBlocked")

@@ -214,6 +214,8 @@ int mpv_initialize(mpv_handle *handle)
 {
     int (*real_initialize)(mpv_handle *) = required_symbol("mpv_initialize");
     atomic_fetch_add(&counters[FaultInitializes], 1);
+    if (atomic_load(&flags) & FaultInitializeBarrier)
+        await_release(FaultInitializeEntered, -1);
     if (atomic_load(&flags) & FaultInitialize)
         return MPV_ERROR_INVALID_PARAMETER;
     return real_initialize(handle);

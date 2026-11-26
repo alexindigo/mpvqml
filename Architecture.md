@@ -14,18 +14,20 @@ private implementation. There is no system MpvQt inheritance or linkage.
 | Private production adapter | Positive monotonic public IDs, independent uint64 native tokens, request-kind/generation correlation and exactly-once queued terminal delivery |
 | Injected mock | Controlled availability/owned queued replies with no native core or worker |
 | Private controller/worker | One blocking bootstrap attempt, then worker-affine submissions, observations, owned event decoding and bounded render-loss recovery |
-| Private core bootstrap | Shared entry point for playback and headless core creation; enforces libmpv's process numeric locale requirement |
-| Private render bridge | Value snapshots, shared leases, generation-tagged/coalesced GUI dispatcher, 32-slot admission and two native retirement workers |
+| Private native backend | 32-slot admission, pinned single-attempt core owner, mode-specific retirement and two native retirement workers; no GL dependency |
+| Private render bridge | Value snapshots, shared playback session state and a generation-tagged/coalesced GUI dispatcher |
 | Private renderer | GL-thread context/FBO/rendering, synchronized snapshot handoff, native callback unregistration and owned-context cleanup |
 | Log/hook helpers | GUI-affine client ownership, immutable registration tokens, generation-aware deletion-safe event drains |
 
 ## Initialization and readiness
 
-Every new core passes through `createMpvCore()`. It serializes creation and
-ensures the process's `LC_NUMERIC` is `C` before libmpv sees it. The host must
-not change this locale while using libmpv. Playback and frame capture still
-own their options, post-creation initialization and retirement independently.
-Log and hook clients attach to an already initialized playback core.
+Only a reserved `MpvBackendCore` can create and initialize a core. It serializes
+creation in this library and sets the process's `LC_NUMERIC` to `C` before
+libmpv sees it. The host must not change this locale while using libmpv. Playback
+and frame capture supply their own option profiles; the owner records locale,
+creation, option and initialization failures with the native code where supplied.
+Unpublished candidates are destroyed on the creating worker. Log and hook clients
+attach to an already initialized playback core.
 
 Allocate controller state before startup. Start/check the native Qt worker,
 move the controller only after successful startup, and finish initial native
@@ -125,7 +127,8 @@ without moving native cleanup to the GUI thread. A non-renderable window defers
 release until rendering or scene-graph cleanup. Renderer destruction is the
 same owner's fallback release path. Injected controllers remain borrowed.
 A separately retained worker control survives Qt's finished notification until
-nonblocking `wait(0)` observes actual native/TLS completion. Last core ownership
+nonblocking `wait(0)` observes actual native/TLS completion. Worker controls use
+the backend's reservation index and capacity. Last shared core ownership
 transfers its handle to preallocated native retirement storage. Two
 process-lifetime workers perform final termination; each of 32 leases remains
 occupied until native destruction completes. Exhaustion is a recoverable
@@ -136,12 +139,15 @@ timeout that drops live handles.
 ## Source and verification
 
 `MpvFrameCapture` is a separate non-item facade for a one-shot transaction.
-It uses the shared native admission/DSO pin budget, not the player command
-queue or GL renderer. Each bounded job owns a regular input descriptor, a
-private libmpv client and a software memory render context on the same
-worker. Qt owns only job admission and guarded queued completion. Native
-cleanup keeps its lease and descriptor until the core is gone, without
-joining the GUI thread. A cancelled job cannot cross the publication gate;
+It uses the shared native admission/DSO pin budget directly, not the player
+command queue or GL renderer. Each bounded job owns a regular input descriptor,
+an exclusive core and a software memory render context on the same worker.
+Job outcome (including early cancellation) is separate from native retirement.
+The worker frees the render context, terminates the core while the input
+descriptor is still live, closes the input and releases the shared slot. Guarded
+GUI delivery then frees the local slot before non-cancelled completion and
+capacity notification. Destruction does not join the worker. A cancelled job
+cannot cross the publication gate;
 the successful handoff is an atomically written caller-owned staged PNG.
 The guiless QML test instantiates the actual registered type and checks
 both exact-seek pixels and cancellation.

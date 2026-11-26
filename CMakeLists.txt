@@ -34,8 +34,8 @@ qt_add_qml_module(mpvqml
         mpvhookmanager.h
         mpvcontroller.cpp
         mpvcontroller_p.h
-        mpvcorebootstrap.cpp
-        mpvcorebootstrap_p.h
+        mpvbackendcore.cpp
+        mpvbackendcore_p.h
         mpvrenderbridge.cpp
         mpvrenderbridge_p.h
         mpvrenderer.cpp
@@ -95,7 +95,7 @@ install(FILES CMakeLists.txt README.md API.md Architecture.md UPSTREAM.md LICENS
     mpvcontroller_adapter.cpp mpvcontroller_adapter.h
     mpvlogclient.cpp mpvlogclient.h mpvhookmanager.cpp mpvhookmanager.h
     mpvcontroller.cpp mpvcontroller_p.h mpvrenderbridge.cpp mpvrenderbridge_p.h
-    mpvcorebootstrap.cpp mpvcorebootstrap_p.h
+    mpvbackendcore.cpp mpvbackendcore_p.h
     mpvrenderer.cpp mpvrenderer_p.h
     mpvframecapture.cpp mpvframecapture.h
     DESTINATION ${CMAKE_INSTALL_DATADIR}/mpvqml/source

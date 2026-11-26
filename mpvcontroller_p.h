@@ -43,6 +43,7 @@ struct MpvInitializationResult {
   bool success = false;
   int error = MPV_ERROR_UNINITIALIZED;
   QString message;
+  MpvCoreStage coreStage = MpvCoreStage::None;
 };
 
 struct MpvNativeReply {

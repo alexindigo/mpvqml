@@ -6,7 +6,6 @@
  * See UPSTREAM.md. Native input ownership and reply decoding are local fixes.
  */
 #include "mpvcontroller_p.h"
-#include "mpvcorebootstrap_p.h"
 
 #include <QByteArray>
 #include <QStringList>
@@ -264,20 +263,9 @@ void MpvController::initialize() {
     emit initializationFinished(false, m_initialization.error, m_initialization.message);
     return;
   }
-  std::unique_ptr<mpv_handle, decltype(&mpv_destroy)> candidate(createMpvCore(), mpv_destroy);
-  int error = MPV_ERROR_GENERIC;
-  QString message = QStringLiteral("mpv_create returned null: core creation failed");
-  if (candidate) {
-    error = mpv_set_option_string(candidate.get(), "vo", "libmpv");
-    if (error >= 0)
-      error = mpv_initialize(candidate.get());
-    message = error < 0 ? QString::fromUtf8(mpv_error_string(error)) : QString();
-  }
-  m_initialization.error = error;
-  m_initialization.message = message;
-  m_initialization.success = error >= 0;
+  const auto diagnostic = m_core->initialize({{"vo", "libmpv"}});
+  m_initialization = {true, diagnostic.error >= 0, diagnostic.error, diagnostic.message, diagnostic.stage};
   if (m_initialization.success) {
-    m_core->publish(candidate.release());
     m_available = true;
     // Registration may synchronously invoke the callback. Publish the fully
     // initialized immutable token and receiver before entering libmpv.
@@ -289,7 +277,7 @@ void MpvController::initialize() {
     mpv_observe_property(m_core->handle(), 0, "time-pos", MPV_FORMAT_DOUBLE);
     mpv_observe_property(m_core->handle(), 0, "pause", MPV_FORMAT_FLAG);
   }
-  emit initializationFinished(m_initialization.success, error, message);
+  emit initializationFinished(m_initialization.success, diagnostic.error, diagnostic.message);
 }
 
 void MpvController::wakeup(void *context) noexcept {
@@ -763,7 +751,7 @@ struct MpvWorkerControl {
 
 namespace {
 struct WorkerRegistry {
-  std::array<std::shared_ptr<MpvWorkerControl>, 32> controls;
+  std::array<std::shared_ptr<MpvWorkerControl>, MpvBackendCore::Capacity> controls;
   QObject *reaper = new QObject; // GUI-affine, no application/static teardown parent
 };
 
@@ -789,11 +777,10 @@ void reapWorker(std::shared_ptr<MpvWorkerControl> control) {
 } // namespace
 
 MpvBackendWorker::MpvBackendWorker() {
-  int error;
-  QString message;
-  auto core = MpvCoreLease::reserve(error, message);
+  MpvCoreDiagnostic diagnostic;
+  auto core = MpvCoreLease::reserve(diagnostic);
   if (!core) {
-    m_result = {true, false, error, message};
+    m_result = {true, false, diagnostic.error, diagnostic.message, diagnostic.stage};
     return;
   }
   m_control = std::make_shared<MpvWorkerControl>();

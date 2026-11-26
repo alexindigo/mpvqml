@@ -440,12 +440,44 @@ and playback UI. Regular local files only; user configuration, scripts and
 external file references are disabled. The library does not manage the
 staging directory or a persistent cache.
 
+libmpv requires the process-wide `LC_NUMERIC` locale to remain `C` while
+its cores are live. mpvqml sets it before core creation, does not restore
+it, and cannot serialize unrelated host locale changes. Hosts must not
+change `LC_NUMERIC` while using libmpv.
+
 A positive ID means admitted, not decoded. `finished(id, code, reason)`
 is queued after admission, exactly once per positive ID while the capture
 object exists. Empty `code` means the PNG is committed; otherwise `code`
 identifies the failed stage and `reason` is diagnostic text. Negative
 admission returns are libmpv error codes and get no signal. Two requests
 may run per instance, further subject to the shared native lease limit.
+
+Alternatively, `tryCapture(source, fraction, maxWidth, maxHeight, destination)`
+submits the same job and returns `{ status, id, error, reason }`. Use one
+admission method per attempt. `status` is one of the `MpvFrameCapture` enum
+values below. An accepted job has a positive `id`, zero `error`, and an empty
+`reason`; a rejected request has `id: 0`, a negative libmpv `error`, and a
+diagnostic `reason`. Only accepted jobs emit `finished`.
+
+| Status | Meaning |
+|---|---|
+| `Accepted` | Job admitted; wait for its terminal result. |
+| `InvalidArguments` | Correct the arguments before trying again. |
+| `LocalBusy` | Both slots on this object are occupied. |
+| `SharedBusy` | The process-wide playback/capture pool is full. |
+| `IdExhausted` | This object's positive ID space is exhausted. |
+| `AllocationFailed` | The library could not allocate job or core ownership. |
+| `BackendUnavailable` | The native retirement service could not start. |
+| `WorkerUnavailable` | The capture worker could not start. |
+
+On local pressure, `capacityReleased(id)` announces that the named job
+has freed its local and shared slots. It follows `finished` and is not
+emitted for rejected requests. A non-cancelled `finished` handler may
+already retry. On shared pressure, use `capacityAvailable()` with a backed-off
+timer to observe capacity freed by other objects or playback. The method is
+an advisory snapshot of ID and slot space, not a reservation or a backend
+health check. A release is not a guarantee that another requester has not
+already taken the slot.
 
 `cancel(id)` returns true if it stopped publication. It queues a
 `cancelled` result and cannot publish that job's PNG. False means the
