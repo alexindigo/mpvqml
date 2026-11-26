@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(mpvqml VERSION 0.2.0 LANGUAGES CXX)
+project(mpvqml VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -71,7 +71,7 @@ qt_add_qml_module(mpvqml
         mpvframecapture.h
 )
 
-set_target_properties(mpvqml PROPERTIES VERSION 0.2.0 SOVERSION 0.2)
+set_target_properties(mpvqml PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 0.3)
 
 target_link_libraries(mpvqml PUBLIC
     Qt6::Core

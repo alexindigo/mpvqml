@@ -4,6 +4,44 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-11-25
+
+### Changed (breaking)
+
+The C++ ABI has changed. Rebuild C++ consumers against the new headers and
+`libmpvqml.so.0.3`; binaries linked against `libmpvqml.so.0.2` cannot use the new
+library as a drop-in replacement. The QML API is additive and the import
+remains `MpvQml 1.0`.
+
+- Reworked the C++ playback and rendering internals (`ed02d4a`, `8cf4e14`,
+  `2cc2e78`).
+
+### Fixed
+
+Videos with rotation metadata no longer abort frame capture in libmpv's
+software renderer. Captured frames still come out in the video's intended
+orientation.
+
+- Apply video rotation after software rendering (`e4ea1a5`).
+
+### Added
+
+Use `MpvFrameCapture` in QML to save video frames, such as thumbnails, without
+opening a window. Building mpvqml now requires Linux, Qt 6.5 or later, and
+libmpv with the software render API. Installed C++ playback consumers can
+use `find_package(mpvqml 0.3 CONFIG REQUIRED)` and link `mpvqml::mpvqml`.
+
+- Add headless frame capture (`f701926`).
+- Export and test the installed CMake package (`7cb6aeb`).
+
+### Documentation
+
+`clearPlaylist()` removes every entry except the one currently playing and
+cancels deferred playlist loads. Use `stop()` to also end playback and clear
+the playlist.
+
+- Correct the documented playlist-clear behavior (`2bfaa26`).
+
 ## [0.2.0] — 2026-10-29
 
 ### Changed (breaking)
