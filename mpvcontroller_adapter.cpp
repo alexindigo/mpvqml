@@ -13,6 +13,7 @@ MpvControllerAdapter::MpvControllerAdapter(QObject *parent) : MpvControllerIface
     connect(controller, &MpvController::fileLoaded, this, &MpvControllerIface::fileLoaded);
     connect(controller, &MpvController::endFile, this, &MpvControllerIface::endFile);
     connect(controller, &MpvController::videoReconfig, this, &MpvControllerIface::videoReconfig);
+    connect(controller, &MpvController::playbackEvent, this, &MpvControllerIface::playbackEvent);
     connect(controller, &MpvController::operationFailed, this, &MpvControllerIface::operationFailed);
     connect(controller, &MpvController::reply, this, &MpvControllerAdapter::receive, Qt::QueuedConnection);
     connect(controller, &MpvController::coreUnavailable, this, [this]() {

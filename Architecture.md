@@ -73,8 +73,9 @@ admission, not native acceptance. Insert the private-token mapping before queue
 admission, remove it before terminal delivery, and settle later submission
 failures or explicit shutdown exactly once while the receiver exists. Native
 uint64 tokens never become QML numbers. Commands, property reads and property
-writes have distinct completion signals. Convenience actions own their results
-and do not masquerade as caller commands.
+writes have distinct completion signals. The GUI ledger checks the reply kind
+before removing its owner; native replies and close share its terminal routing.
+Convenience actions own their results and do not masquerade as caller commands.
 
 Hook continuation IDs are the separate libmpv uint64/quint64 hook identifiers,
 not allocated int request IDs or the adapter's private correlation tokens. See
@@ -85,6 +86,12 @@ event wait. User-built input nodes have noncopyable, value-initialized ownership
 and allocator-matched recursive cleanup, including rejected submissions. Native
 event-owned nodes are never freed as input/output objects. Flag events read the
 API's integer type. Getters never synchronously invoke a live backend.
+The worker stamps lifecycle diagnostics with the native entry and playback
+generation, independently of caller intent and request tokens. It copies end
+reason and code before delivery. The additive GUI signal retains those values
+without changing the historical end/error signals. Overflow discards recovery
+and current entry correlation, refreshes registered observations, and does not
+infer lost lifecycle events or settle still-reserved request replies.
 
 ## Rendering and recovery
 
@@ -126,11 +133,13 @@ entry point and unpack state from the calling thread's current context. See
 
 Mark shutdown before external calls, disconnect derived-class/self/window
 delivery before base destruction, and shut down/delete helpers before releasing
-controller/bridge ownership. Helpers exchange handles to null, advance
-generation, unregister callbacks as a barrier, then destroy clients/tokens.
-Queued wakeups contain receiver/generation values, never token pointers. Event
-drains are single-entry and check a same-thread QPointer immediately after each
-external signal, then recheck generation/handle identity.
+controller/bridge ownership. Worker and helpers share the event-client drain
+protocol, not renderer or capture callbacks. The worker borrows its handle;
+helpers own theirs. Closing advances generation, nulls the handle and unregisters
+callbacks as a barrier before releasing the token and any owned handle. Queued
+wakeups are receiver-bound and do not carry token pointers. Each drain is
+single-entry, checks the receiver after each event, and reposts after at most
+32 events or when nested delivery has consumed a pending wakeup.
 
 Player/window destruction never joins the live controller or final native core.
 Explicit shutdown, native core loss and item destruction share one detach

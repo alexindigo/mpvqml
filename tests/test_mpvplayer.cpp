@@ -11,6 +11,7 @@
 #include <QtQuick/QQuickWindow>
 #include <QtTest>
 #include <clocale>
+#include "../mpveventclient_p.h"
 
 // Open up all protected and private channels for the
 // test engine
@@ -1025,11 +1026,11 @@ private slots:
     {
       MpvLogClient client;
       client.setupLogClient(core);
-      QVERIFY(client.m_logClient);
+      QVERIFY(client.m_events->handle());
 
       client.setLogLevel(QStringLiteral("info"));
       client.setLogLevel(QStringLiteral("no"));
-      QVERIFY(!client.m_logClient);
+      QVERIFY(!client.m_events->handle());
     }
     mpv_destroy(core);
   }
@@ -1037,7 +1038,7 @@ private slots:
   void test_mpv_log_client_null_core() {
     MpvLogClient client;
     client.setupLogClient(nullptr);
-    QVERIFY(!client.m_logClient);
+    QVERIFY(!client.m_events->handle());
     client.setLogLevel(QStringLiteral("info"));
     client.setLogLevel(QStringLiteral("no"));
     QVERIFY(true);
@@ -1049,9 +1050,10 @@ private slots:
     {
       MpvLogClient client;
       client.setupLogClient(core);
-      mpv_handle *first = client.m_logClient;
+      mpv_handle *first = client.m_events->handle();
+      QVERIFY(first);
       client.setupLogClient(core);
-      QCOMPARE(client.m_logClient, first);
+      QCOMPARE(client.m_events->handle(), first);
     }
     mpv_destroy(core);
   }
@@ -1062,7 +1064,7 @@ private slots:
     {
       MpvHookManager manager;
       manager.setupHookClient(core);
-      QVERIFY(manager.m_hookClient);
+      QVERIFY(manager.m_events->handle());
 
       manager.hookAdd(QStringLiteral("on_load"), 0);
       manager.hookAdd(QStringLiteral("on_unload"), 50);
@@ -1074,7 +1076,7 @@ private slots:
   void test_mpv_hook_manager_null_core() {
     MpvHookManager manager;
     manager.setupHookClient(nullptr);
-    QVERIFY(!manager.m_hookClient);
+    QVERIFY(!manager.m_events->handle());
     manager.hookAdd(QStringLiteral("on_load"), 0);
     manager.hookContinue(1);
     QVERIFY(true);
@@ -1086,9 +1088,10 @@ private slots:
     {
       MpvHookManager manager;
       manager.setupHookClient(core);
-      mpv_handle *first = manager.m_hookClient;
+      mpv_handle *first = manager.m_events->handle();
+      QVERIFY(first);
       manager.setupHookClient(core);
-      QCOMPARE(manager.m_hookClient, first);
+      QCOMPARE(manager.m_events->handle(), first);
     }
     mpv_destroy(core);
   }

@@ -356,9 +356,68 @@ onVideoReconfig: console.log("video reconfigured")
 |---|---|---|
 | `playbackEnded()` | -- | Playback reached the end of the file. |
 | `fileStarted()` | -- | A new file has started loading. |
-| `fileLoaded()` | -- | A file has finished loading and is ready to play. |
-| `endFile(reason)` | `reason`: string | Playback ended. `reason` is `"eof"`, `"stop"`, `"error"`, etc. |
+| `fileLoaded()` | -- | The file is loaded, not necessarily producing output. |
+| `endFile(reason)` | `reason`: string | Legacy reasons: `"eof"`, `"stop"`, or `"error"`. |
+| `playbackEvent(details)` | `details`: var | Owned native lifecycle diagnostic; see below. |
 | `videoReconfig()` | -- | Video parameters changed (resolution, aspect ratio, etc.). |
+
+`playbackEvent` carries `stage` (`start-file`, `file-loaded`, `seek`,
+`playback-restart`, `end-file`, `queue-overflow` or `shutdown`), `entryId`,
+`generation`, `reason`, `nativeReason`, `nativeCode` and `message`. Entry and
+generation identifiers are decimal strings (empty when unknown) so no 64-bit
+identity is rounded by JavaScript. Generations are scoped to one player and
+change on native starts and queue overflow. The stage is not associated with
+a caller request ID. `end-file` exposes the original native reason (including
+`quit`, `redirect` and `unknown`) and code; the legacy `endFile("error")` /
+`errorOccurred(LoadingFailed, ...)` pair stays unchanged. Other stages have
+empty reason, `nativeReason: -1`, and zero code except `queue-overflow`, whose
+diagnostic code is `EventQueueFull`. Notification follows native order within
+this signal, and precedes any corresponding legacy lifecycle signal.
+
+Overflow means some unsolicited events were lost. Discard lifecycle inference
+and wait for a fresh start for known entry correlation. The library invalidates
+renderer recovery and refreshes property observations; the last available
+values remain visible until refreshed. Already reserved command/property replies
+are not failed or replayed merely because of overflow.
+
+The command reply, file load and playback restart answer separate questions.
+For video presentation, a restart is not proof that a Qt window drew a frame.
+Invoke `openMedia()` with a local path once the player is initialized (and when
+renderer-ready for an attached video player):
+
+<!-- playback-example -->
+```qml
+import MpvQml
+
+MpvPlayer {
+    property int loadRequest: 0
+    property bool commandAccepted: false
+    property int restartCount: 0
+
+    function openMedia(path: string) {
+        commandAccepted = false
+        restartCount = 0
+        loadRequest = commandAsync(["loadfile", path])
+        if (loadRequest < 0) console.warn("Load not admitted:", loadRequest)
+    }
+
+    onAsyncCommandFinished: (id, error, result) => {
+        if (id === loadRequest) commandAccepted = error === 0
+    }
+    onPlaybackEvent: details => {
+        if (details.stage === "playback-restart") ++restartCount
+        if (details.stage === "end-file" && details.nativeCode < 0)
+            console.warn("Playback failed:", details.nativeCode, details.message)
+    }
+}
+```
+
+For screenshots where the caller needs a result, submit
+`commandAsync(["screenshot-to-file", privatePath, "video"])` and match its
+`asyncCommandFinished` ID. A successful reply does not manage the file's lifetime
+or publish it to a shared destination. Own the private path and validate the
+image before handing it to another consumer. `shutdown()` does not cancel an
+in-flight file write.
 
 ```qml
 onErrorOccurred: function(code, msg) {
@@ -372,6 +431,7 @@ onLogMessage: function(facility, level, text) {
 | Signal | Arguments | Description |
 |---|---|---|
 | `errorOccurred(code, message)` | `code`: int, `message`: string | A playback error occurred. |
+| `operationFailed(operation, code, message)` | `operation`: string, `code`: int, `message`: string | An operation failed; includes the original seam/renderer message when available. |
 | `logMessage(facility, level, text)` | `facility`: string, `level`: string, `text`: string | A log message from mpv. Enable with `setLogLevel()`. |
 
 ```qml
@@ -433,15 +493,24 @@ Publication never replaces an existing file, link, or competing writer's
 result. The staging filesystem must allow hard links within that directory.
 On Linux an accessible `/proc/<pid>/fd/<directory-fd>` may name the directory:
 
+<!-- capture-example -->
 ```qml
 import MpvQml
 
 MpvFrameCapture {
-    // capture(sourceUrl, 0.1, 256, 256, privatePngUrl)
+    property int ticket: 0
+    property bool staged: false
+
+    function requestFrame(sourceUrl: url, privatePngUrl: url) {
+        if (ticket > 0) return
+        staged = false
+        ticket = capture(sourceUrl, 0.75, 123, 88, privatePngUrl)
+        if (ticket < 0) console.warn("Capture not admitted:", ticket)
+    }
     onFinished: (id, code, reason) => {
-        if (code === "") {
-            // The staged PNG is ready to use or validate before publication.
-        }
+        if (id !== ticket) return
+        ticket = 0
+        staged = code === "" // Validate the caller-owned PNG before publication.
     }
 }
 ```

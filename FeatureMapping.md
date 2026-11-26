@@ -14,6 +14,7 @@ MpvQt classes are not part of the public API or runtime dependency graph.
 | Generic property reads | `readMpvPropertyAsync(name)` | Adapter correlation → `mpv_get_property_async`, owned result envelopes |
 | Reactive reads | Typed getters and Changed signals | Private controller observations → copied GUI registry handlers |
 | Generic commands/results | `commandAsync(params)` / `asyncCommandFinished(id, error, result)` | `mpv_command_node_async`, immediate input cleanup, owned native result copies |
+| Playback diagnostics | `playbackEvent(details)` alongside legacy lifecycle signals | Owned native stage, entry/generation, end reason/code; overflow refreshes observations without replaying admitted requests |
 | Configuration files | `loadConfigFile(path)` | Worker-affine native loading; operation failures reported to the facade |
 | Screenshots | `screenshot(mode)` or explicit caller screenshot command | Async submission; final core/file I/O retires off GUI/render threads |
 | One-shot local video frame | `MpvFrameCapture.capture` / `tryCapture` / `cancel` / `finished` / `finishedDetailed` | Worker-owned load/seek and software-frame transaction, shared native admission, bounded no-clobber staged PNG |

@@ -238,6 +238,7 @@ signals:
     void logMessage(const QString &facility, const QString &level, const QString &text);
     void fileStarted();
     void fileLoaded();
+    void playbackEvent(const QVariantMap &details);
     void endFile(const QString &reason);
     void videoReconfig();
     void asyncCommandFinished(int id, int error, const QVariant &result);
@@ -260,7 +261,7 @@ private:
     void setupPropertyObservers();
     void syncProperties();
     void emitError(int code, const QString &message);
-    void failOperation(const QString &operation, int error);
+    void failOperation(const QString &operation, int error, const QString &detail = {});
     void setOwnedProperty(const QString &name, const QVariant &value);
     void observeOwnedProperty(const QString &name, const QVariant &value);
     void flushProperty(const QString &name, quint64 revision);
@@ -276,7 +277,11 @@ private:
     void rendererStatus(quint64 generation, bool ready, int error, const QString &message);
     void observeWindow(QQuickWindow *window);
     void detach(bool notify);
-    void complete(int id, int error, const QVariant &value, int kind);
+    enum class RequestKind { Command, PropertySet, PropertyRead, Configuration };
+    struct RequestOwner { RequestKind kind; bool caller; QString operation; quint64 propertyRevision = 0; };
+    enum class Settlement { Reply, Closed };
+    void complete(int id, int error, const QVariant &value, RequestKind kind);
+    void settle(int id, const RequestOwner &owner, int error, const QVariant &value, Settlement settlement);
     QString m_source;
     bool m_paused = false;
     double m_playbackSpeed = 1.0;
@@ -319,6 +324,5 @@ private:
     quint64 m_errorRevision = 0;
     struct DeferredInitAction { QString stateKey; std::function<void()> retry; };
     QVector<DeferredInitAction> m_deferredInitActions;
-    struct RequestOwner { int kind; bool caller; QString operation; quint64 propertyRevision = 0; };
     QHash<int, RequestOwner> m_requests;
 };

@@ -265,6 +265,12 @@ int mpv_command_async(mpv_handle *handle, uint64_t token, const char **args)
 mpv_event *mpv_wait_event(mpv_handle *handle, double timeout)
 {
     mpv_event *(*real_wait)(mpv_handle *, double) = required_symbol("mpv_wait_event");
+    static _Thread_local mpv_event *held_reply;
+    if (held_reply) {
+        mpv_event *reply = held_reply;
+        held_reply = NULL;
+        return reply;
+    }
     if (seek_token) {
         static _Thread_local mpv_event stale;
         if (fake_events == 2) {
@@ -286,6 +292,13 @@ mpv_event *mpv_wait_event(mpv_handle *handle, double timeout)
         atomic_fetch_add(&counters[FaultCaptureSeekSubmitted], 1);
     }
     mpv_event *event = real_wait(handle, timeout);
+    if (event->event_id == MPV_EVENT_GET_PROPERTY_REPLY &&
+        (atomic_fetch_and(&flags, ~FaultPlaybackOverflow) & FaultPlaybackOverflow)) {
+        static _Thread_local mpv_event overflow;
+        held_reply = event;
+        overflow = (mpv_event){.event_id = MPV_EVENT_QUEUE_OVERFLOW};
+        return &overflow;
+    }
     if ((atomic_load(&flags) & FaultCaptureEvents)
         && (event->event_id == MPV_EVENT_COMMAND_REPLY || event->event_id == MPV_EVENT_FILE_LOADED
             || event->event_id == MPV_EVENT_SEEK || event->event_id == MPV_EVENT_PLAYBACK_RESTART))

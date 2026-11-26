@@ -12,7 +12,8 @@ enum MpvQmlFault {
   FaultInitializeBarrier = 128,
   FaultCaptureEvents = 256,
   FaultCaptureBeforePublish = 512,
-  FaultCapturePublish = 1024
+  FaultCapturePublish = 1024,
+  FaultPlaybackOverflow = 2048
 };
 
 enum MpvQmlFaultCounter {

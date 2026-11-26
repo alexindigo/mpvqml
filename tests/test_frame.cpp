@@ -60,6 +60,32 @@ private slots:
     QVERIFY(value);
   }
 
+  void documentedCaptureExampleStagesPixels() {
+    QFile doc(QStringLiteral(TEST_ASSET_PATH "/../../API.md"));
+    QVERIFY(doc.open(QIODevice::ReadOnly));
+    const auto bytes = doc.readAll();
+    const QByteArray marker = "<!-- capture-example -->\n```qml\n";
+    const auto offset = bytes.indexOf(marker);
+    QVERIFY(offset >= 0);
+    const auto start = offset + marker.size();
+    const auto end = bytes.indexOf("\n```", start);
+    QVERIFY(end > start);
+    QQmlComponent component(&engine);
+    component.setData(bytes.mid(start, end - start), QUrl());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    std::unique_ptr<QObject> example(component.create());
+    QVERIFY2(example, qPrintable(component.errorString()));
+    const auto path = target("example.png");
+    QVERIFY(QMetaObject::invokeMethod(example.get(), "requestFrame", asset("test_frame_seek.webm"), path));
+    QVERIFY(example->property("ticket").toInt() > 0);
+    QTRY_VERIFY(example->property("staged").toBool());
+    QCOMPARE(example->property("ticket").toInt(), 0);
+    const QImage image(path.toLocalFile());
+    QCOMPARE(image.size(), QSize(123, 69));
+    const auto pixel = image.pixelColor(61, 34);
+    QVERIFY2(pixel.blue() > 210 && pixel.red() < 30, qPrintable(pixel.name()));
+  }
+
   void capturesUnderNonCNumericLocale() {
     if (!qEnvironmentVariableIsSet("MPVQML_NON_C_TEST_CHILD")) {
       QProcess child;

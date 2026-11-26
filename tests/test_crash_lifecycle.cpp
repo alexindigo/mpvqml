@@ -74,6 +74,7 @@ private slots:
     if (fixtureName == "coreCreationFailure") flags = FaultCreate;
     if (fixtureName == "coreInitializationFailure") flags = FaultInitialize;
     if (fixtureName == "captureInitializationFailure") flags = FaultInitialize;
+    if (fixtureName == "playbackOverflowLeavesReservedRepliesIntact") flags = FaultPlaybackOverflow;
     if (fixtureName == "captureSuccessReusesReleasedSlot") flags = FaultRetirementBarrier;
     if (fixtureName == "captureIgnoresUncorrelatedEvents") flags = FaultCaptureEvents;
     if (fixtureName == "captureCancellationWins" || fixtureName == "captureExpiresBeforeEncoding")
@@ -161,6 +162,27 @@ private slots:
     QCOMPARE(faults.counter(FaultInitializes), 1L);
     QCOMPARE(faults.counter(FaultCandidateDestroys), 1L);
     QCOMPARE(faults.counter(FaultRetirementEntered), 0L);
+    exercised();
+  }
+
+  void playbackOverflowLeavesReservedRepliesIntact() {
+    MpvPlayer player;
+    QVERIFY(player.coreAvailable());
+    QSignalSpy details(&player, SIGNAL(playbackEvent(QVariantMap)));
+    QSignalSpy replies(&player, &MpvPlayer::mpvPropertyReadFinished);
+    const auto id = player.readMpvPropertyAsync(QStringLiteral("time-pos"));
+    QVERIFY(id > 0);
+    QTRY_COMPARE(replies.size(), 1);
+    QCOMPARE(replies[0][0].toInt(), id);
+    QCOMPARE(replies[0][1].toInt(), MPV_ERROR_PROPERTY_UNAVAILABLE);
+    QVERIFY(!replies[0][2].isValid());
+    QVERIFY(details.isValid());
+    QTRY_COMPARE(details.size(), 1);
+    const auto diagnostic = details[0][0].toMap();
+    QCOMPARE(diagnostic.value("stage").toString(), QStringLiteral("queue-overflow"));
+    QCOMPARE(diagnostic.value("nativeCode").toInt(), MPV_ERROR_EVENT_QUEUE_FULL);
+    QCOMPARE(diagnostic.value("entryId").toString(), QString());
+    QVERIFY(player.coreAvailable());
     exercised();
   }
 
@@ -900,6 +922,7 @@ private slots:
   void nativeFaults_data() {
     QTest::addColumn<QString>("name");
     for (const char *name : {"coreCreationFailure", "coreInitializationFailure", "captureInitializationFailure",
+                            "playbackOverflowLeavesReservedRepliesIntact",
                             "mixedAdmissionHoldsCancelledSlots", "captureSuccessReusesReleasedSlot",
                             "captureIgnoresUncorrelatedEvents", "captureCancellationWins",
                             "capturePublicationWins", "captureCompetingWriter",

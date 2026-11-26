@@ -134,8 +134,14 @@ MpvPlayer::MpvPlayer(QQuickItem *parent, MpvControllerIface *ctrl)
         if (alive) failOperation(QStringLiteral("coreUnavailable"), MPV_ERROR_UNINITIALIZED);
     });
     connect(m_ctrl, &MpvControllerIface::operationFailed, this,
-            [this](const QString &operation, int error, const QString &) {
-        if (!m_shuttingDown) failOperation(operation, error);
+            [this](const QString &operation, int error, const QString &message) {
+        if (!m_shuttingDown) failOperation(operation, error, message);
+    });
+    connect(m_ctrl, &MpvControllerIface::playbackEvent, this, [this](const QVariantMap &details) {
+        if (!m_shuttingDown) {
+            const QVariantMap owned = details;
+            emit playbackEvent(owned);
+        }
     });
     connect(m_ctrl, &QObject::destroyed, this, [this]() {
         m_ctrl = nullptr;
@@ -173,13 +179,13 @@ MpvPlayer::MpvPlayer(QQuickItem *parent, MpvControllerIface *ctrl)
     // replies and observations in that order, not on different GUI turns.
     const auto replyDelivery = ctrl ? Qt::QueuedConnection : Qt::DirectConnection;
     connect(m_ctrl, &MpvControllerIface::asyncCommandFinished, this,
-            [this](int id, int error, const QVariant &value) { complete(id, error, value, 0); }, Qt::QueuedConnection);
+            [this](int id, int error, const QVariant &value) { complete(id, error, value, RequestKind::Command); }, Qt::QueuedConnection);
     connect(m_ctrl, &MpvControllerIface::mpvPropertySetFinished, this,
-            [this](int id, int error) { complete(id, error, {}, 1); }, replyDelivery);
+            [this](int id, int error) { complete(id, error, {}, RequestKind::PropertySet); }, replyDelivery);
     connect(m_ctrl, &MpvControllerIface::mpvPropertyReadFinished, this,
-            [this](int id, int error, const QVariant &value) { complete(id, error, value, 2); }, replyDelivery);
+            [this](int id, int error, const QVariant &value) { complete(id, error, value, RequestKind::PropertyRead); }, replyDelivery);
     connect(m_ctrl, &MpvControllerIface::configurationFinished, this,
-            [this](int id, int error) { complete(id, error, {}, 3); }, Qt::QueuedConnection);
+            [this](int id, int error) { complete(id, error, {}, RequestKind::Configuration); }, Qt::QueuedConnection);
     m_initialization = m_ctrl->initialize();
     m_coreAvailable = m_initialization.success && m_ctrl->available();
     if (m_private->controller) m_private->bridge->core = m_private->controller->core();
@@ -199,8 +205,8 @@ MpvPlayer::MpvPlayer(QQuickItem *parent, MpvControllerIface *ctrl)
     });
     connect(dispatcher.get(), &MpvRenderDispatcher::statusChanged, this, &MpvPlayer::rendererStatus);
     connect(dispatcher.get(), &MpvRenderDispatcher::parameterFailed, this,
-            [this](quint64 generation, const QString &name, int error, const QString &) {
-        if (!m_shuttingDown && generation == m_private->bridge->generation.load()) failOperation(name, error);
+            [this](quint64 generation, const QString &name, int error, const QString &message) {
+        if (!m_shuttingDown && generation == m_private->bridge->generation.load()) failOperation(name, error, message);
     });
     connect(dispatcher.get(), &MpvRenderDispatcher::contextRetiring, this,
             [this](quint64 generation, quint64 intent) {
@@ -475,7 +481,7 @@ void MpvPlayer::flushProperty(const QString &name, quint64 revision) {
     state.writing = revision;
     const int id = m_ctrl->setMpvPropertyAsync(name, state.toNative(state.desired));
     if (id > 0) {
-        m_requests.insert(id, {1, false, name, revision});
+        m_requests.insert(id, {RequestKind::PropertySet, false, name, revision});
         return;
     }
     state.writing = 0;
@@ -500,7 +506,7 @@ void MpvPlayer::acknowledgeProperty(const QString &name, quint64 revision, int e
     // libmpv coalesces observations and does not guarantee notification for
     // a write (including rejected writes). Read after the matching reply.
     const int id = coreAvailable() ? m_ctrl->readMpvPropertyAsync(name) : MPV_ERROR_UNINITIALIZED;
-    if (id > 0) m_requests.insert(id, {2, false, name, revision});
+    if (id > 0) m_requests.insert(id, {RequestKind::PropertyRead, false, name, revision});
     else reconcileProperty(name, revision, {});
 }
 
@@ -565,7 +571,7 @@ void MpvPlayer::syncProperties() {
 void MpvPlayer::submitProperty(const QString &name, const QVariant &value) {
     const int id = coreAvailable() && m_ctrl ? m_ctrl->setMpvPropertyAsync(name, value) : MPV_ERROR_UNINITIALIZED;
     if (id < 0) failOperation(name, id);
-    else m_requests.insert(id, {1, false, name});
+    else m_requests.insert(id, {RequestKind::PropertySet, false, name});
 }
 void MpvPlayer::submitCommand(const QStringList &params, bool orderedLoad) {
     const QString operation = params.isEmpty() ? QStringLiteral("command") : params[0];
@@ -575,7 +581,7 @@ void MpvPlayer::submitCommand(const QStringList &params, bool orderedLoad) {
     QPointer<MpvPlayer> alive(this);
     const int id = coreAvailable() && m_ctrl ? m_ctrl->commandAsync(params) : MPV_ERROR_UNINITIALIZED;
     if (id < 0) failOperation(operation, id);
-    else m_requests.insert(id, {0, false, operation});
+    else m_requests.insert(id, {RequestKind::Command, false, operation});
     if (alive && effect == MediaEffect::ClearPendingLoads) drainMedia();
 }
 int MpvPlayer::commandAsync(const QStringList &params) {
@@ -583,41 +589,49 @@ int MpvPlayer::commandAsync(const QStringList &params) {
     if (effect == MediaEffect::Replace || effect == MediaEffect::ClearPendingLoads)
         supersedeMedia(effect == MediaEffect::ClearPendingLoads);
     const int id = coreAvailable() && m_ctrl ? m_ctrl->commandAsync(params) : MPV_ERROR_UNINITIALIZED;
-    if (id > 0) m_requests.insert(id, {0, true, QStringLiteral("commandAsync")});
+    if (id > 0) m_requests.insert(id, {RequestKind::Command, true, QStringLiteral("commandAsync")});
     if (effect == MediaEffect::ClearPendingLoads) drainMedia();
     return id;
 }
 int MpvPlayer::setMpvPropertyAsync(const QString &name, const QVariant &value) {
     if (propertyMediaEffect(name) == MediaEffect::Replace) supersedeMedia();
     const int id = coreAvailable() && m_ctrl ? m_ctrl->setMpvPropertyAsync(name, value) : MPV_ERROR_UNINITIALIZED;
-    if (id > 0) m_requests.insert(id, {1, true, name});
+    if (id > 0) m_requests.insert(id, {RequestKind::PropertySet, true, name});
     return id;
 }
 int MpvPlayer::readMpvPropertyAsync(const QString &name) {
     const int id = coreAvailable() && m_ctrl ? m_ctrl->readMpvPropertyAsync(name) : MPV_ERROR_UNINITIALIZED;
-    if (id > 0) m_requests.insert(id, {2, true, name});
+    if (id > 0) m_requests.insert(id, {RequestKind::PropertyRead, true, name});
     return id;
 }
-void MpvPlayer::complete(int id, int error, const QVariant &value, int kind) {
+void MpvPlayer::complete(int id, int error, const QVariant &value, RequestKind kind) {
     const auto found = m_requests.find(id);
     if (found == m_requests.end() || found->kind != kind) return;
     const RequestOwner owner = found.value();
     m_requests.erase(found);
+    settle(id, owner, error, value, Settlement::Reply);
+}
+
+void MpvPlayer::settle(int id, const RequestOwner &owner, int error, const QVariant &value, Settlement settlement) {
     const QVariant ownedValue = value;
     QPointer<MpvPlayer> alive(this);
-    if (owner.propertyRevision) {
-        if (kind == 2) {
+    if (settlement == Settlement::Reply && owner.propertyRevision) {
+        if (owner.kind == RequestKind::PropertyRead) {
             reconcileProperty(owner.operation, owner.propertyRevision, error >= 0 ? ownedValue : QVariant());
             return;
         }
         acknowledgeProperty(owner.operation, owner.propertyRevision, error);
     }
     if (owner.caller) {
-        if (kind == 0) emit asyncCommandFinished(id, error, ownedValue);
-        else if (kind == 1) emit mpvPropertySetFinished(id, error);
-        else if (kind == 2) emit mpvPropertyReadFinished(id, error, ownedValue);
+        switch (owner.kind) {
+        case RequestKind::Command: emit asyncCommandFinished(id, error, ownedValue); break;
+        case RequestKind::PropertySet: emit mpvPropertySetFinished(id, error); break;
+        case RequestKind::PropertyRead: emit mpvPropertyReadFinished(id, error, ownedValue); break;
+        case RequestKind::Configuration: Q_UNREACHABLE();
+        }
     }
-    if (alive && error < 0) failOperation(owner.operation, error);
+    if (alive && error < 0 && (settlement == Settlement::Reply || !owner.caller))
+        failOperation(owner.operation, error);
 }
 
 void MpvPlayer::enqueueMedia(const QString &operation, const QString &stateKey, std::function<void()> action) {
@@ -799,9 +813,9 @@ void MpvPlayer::emitError(int code, const QString &message) {
     emit lastErrorChanged();
     if (alive && revision == m_errorRevision) emit errorOccurred(code, ownedMessage);
 }
-void MpvPlayer::failOperation(const QString &operation, int error) {
+void MpvPlayer::failOperation(const QString &operation, int error, const QString &detail) {
     const QString ownedOperation = operation;
-    const QString message = QString::fromUtf8(mpv_error_string(error));
+    const QString message = detail.isEmpty() ? QString::fromUtf8(mpv_error_string(error)) : detail;
     const quint64 previousError = m_errorRevision;
     QPointer<MpvPlayer> alive(this);
     emit operationFailed(ownedOperation, error, message);
@@ -816,7 +830,7 @@ void MpvPlayer::setLogLevel(const QString &level) {
 void MpvPlayer::loadConfigFile(const QString &path) {
     const int id = coreAvailable() && m_ctrl ? m_ctrl->loadConfigurationAsync(path) : MPV_ERROR_UNINITIALIZED;
     if (id < 0) failOperation(QStringLiteral("loadConfigFile"), id);
-    else m_requests.insert(id, {3, false, QStringLiteral("loadConfigFile")});
+    else m_requests.insert(id, {RequestKind::Configuration, false, QStringLiteral("loadConfigFile")});
 }
 void MpvPlayer::setRenderParameter(const QString &name, const QVariant &value) {
     if (!coreAvailable()) { failOperation(name, MPV_ERROR_UNINITIALIZED); return; }
@@ -870,11 +884,7 @@ void MpvPlayer::detach(bool notify) {
         const int id = it.key();
         const RequestOwner owner = it.value();
         QMetaObject::invokeMethod(this, [this, id, owner]() {
-            if (owner.caller) {
-                if (owner.kind == 0) emit asyncCommandFinished(id, MPV_ERROR_UNINITIALIZED, {});
-                else if (owner.kind == 1) emit mpvPropertySetFinished(id, MPV_ERROR_UNINITIALIZED);
-                else if (owner.kind == 2) emit mpvPropertyReadFinished(id, MPV_ERROR_UNINITIALIZED, {});
-            } else failOperation(owner.operation, MPV_ERROR_UNINITIALIZED);
+            settle(id, owner, MPV_ERROR_UNINITIALIZED, {}, Settlement::Closed);
         }, Qt::QueuedConnection);
     }
     if (m_private->controller) m_private->controller->shutdown();

@@ -8,6 +8,7 @@
 #pragma once
 
 #include "mpvrenderbridge_p.h"
+#include "mpveventclient_p.h"
 #include <QObject>
 #include <QVariant>
 #include <QHash>
@@ -80,13 +81,14 @@ signals:
   void fileLoaded();
   void endFile(const QString &reason);
   void videoReconfig();
+  void playbackEvent(const QVariantMap &details);
   void playbackRecovered(quint64 rendererGeneration, qlonglong entryId);
 
 private:
-  struct WakeupToken;
-  static void wakeup(void *context) noexcept;
-  void drain(quint64 generation);
-  void unregisterWakeup();
+  void receiveEvent(const mpv_event &event);
+  QVariantMap playbackDetails(const char *stage, qlonglong entryId, quint64 generation,
+                              int code = 0, int nativeReason = -1, const QString &reason = {}) const;
+  void reconcileEventOverflow();
   bool available() const noexcept;
   void submissionResult(MpvRequestKind kind, quint64 token, int error);
   struct PlaybackState {
@@ -144,13 +146,14 @@ private:
   bool m_observedPause = false;
   std::shared_ptr<MpvCoreLease> m_core;
   MpvInitializationResult m_initialization;
-  std::unique_ptr<WakeupToken> m_wakeup;
+  struct Observation { QString name; mpv_format format; quint64 token; };
+  QList<Observation> m_observations;
+  MpvEventClient m_events;
+  qlonglong m_eventEntry = -1;
+  quint64 m_eventGeneration = 0;
   quint64 m_generation = 1;
   bool m_available = false;
-  bool m_wakeupRegistered = false;
   bool m_closing = false;
-  bool m_draining = false;
-  bool m_redrain = false;
 };
 
 struct MpvWorkerControl;

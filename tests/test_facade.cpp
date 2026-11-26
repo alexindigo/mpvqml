@@ -52,6 +52,123 @@ private slots:
             QTest::newRow(name) << QString::fromLatin1(name);
     }
 
+    void operationFailureKeepsSeamMessage() {
+        MockMpvController mock;
+        MpvPlayer player(nullptr, &mock);
+        QSignalSpy failed(&player, &MpvPlayer::operationFailed);
+        QSignalSpy error(&player, &MpvPlayer::errorOccurred);
+        const QString nativeDetail = QStringLiteral("native observer context");
+        emit mock.operationFailed("observeProperty", MPV_ERROR_GENERIC, nativeDetail);
+        QCOMPARE(failed.size(), 1);
+        QCOMPARE(failed[0][2].toString(), nativeDetail);
+        QCOMPARE(error.size(), 1);
+        QCOMPARE(error[0][1].toString(), nativeDetail);
+    }
+
+    void nativePlaybackDiagnosticsKeepEntryAndNativeCode() {
+        MpvPlayer player;
+        QSignalSpy details(&player, SIGNAL(playbackEvent(QVariantMap)));
+        QSignalSpy done(&player, &MpvPlayer::asyncCommandFinished);
+        QSignalSpy legacy(&player, &MpvPlayer::endFile);
+        QTemporaryDir fixture;
+        QVERIFY(fixture.isValid());
+        QFile invalid(fixture.filePath("invalid.mp4"));
+        QVERIFY(invalid.open(QIODevice::WriteOnly));
+        QVERIFY(invalid.write("not a video container") > 0);
+        invalid.close();
+        const int id = player.commandAsync({"loadfile", invalid.fileName()});
+        QVERIFY(id > 0);
+        QTRY_COMPARE(done.size(), 1);
+        QCOMPARE(done[0][0].toInt(), id);
+        QCOMPARE(done[0][1].toInt(), 0);
+        QTRY_COMPARE(legacy.size(), 1);
+        QCOMPARE(legacy[0][0].toString(), QStringLiteral("error"));
+        QVERIFY(details.isValid());
+        QTRY_COMPARE(details.size(), 2);
+        const auto start = details[0][0].toMap();
+        const auto end = details[1][0].toMap();
+        QCOMPARE(start.value("stage").toString(), QStringLiteral("start-file"));
+        QCOMPARE(end.value("stage").toString(), QStringLiteral("end-file"));
+        QCOMPARE(end.value("reason").toString(), QStringLiteral("error"));
+        QCOMPARE(end.value("nativeCode").toInt(), MPV_ERROR_UNKNOWN_FORMAT);
+        QCOMPARE(end.value("nativeReason").toInt(), MPV_END_FILE_REASON_ERROR);
+        QVERIFY(!start.value("entryId").toString().isEmpty());
+        QVERIFY(!start.value("generation").toString().isEmpty());
+        QCOMPARE(end.value("entryId"), start.value("entryId"));
+        QCOMPARE(end.value("generation"), start.value("generation"));
+    }
+
+    void nativePlaybackExampleTracksLoadSeekRestartAndShutdown() {
+        QFile doc(QStringLiteral(MPVQML_EXAMPLES_DIR) + "/../API.md");
+        QVERIFY(doc.open(QIODevice::ReadOnly));
+        const auto bytes = doc.readAll();
+        const QByteArray startMark = "<!-- playback-example -->\n```qml\n";
+        const auto offset = bytes.indexOf(startMark);
+        QVERIFY(offset >= 0);
+        const auto start = offset + startMark.size();
+        const auto end = bytes.indexOf("\n```", start);
+        QVERIFY(end > start);
+        QQmlEngine engine;
+        QQmlComponent component(&engine);
+        component.setData(bytes.mid(start, end - start), QUrl());
+        QTRY_VERIFY(component.isReady() || component.isError());
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        std::unique_ptr<QObject> object(component.create());
+        QVERIFY2(object, qPrintable(component.errorString()));
+        auto *player = qobject_cast<MpvPlayer *>(object.get());
+        QVERIFY(player);
+        QSignalSpy details(player, &MpvPlayer::playbackEvent);
+        QSignalSpy writes(player, &MpvPlayer::mpvPropertySetFinished);
+        QVERIFY(player->setMpvPropertyAsync("ao", "null") > 0);
+        QVERIFY(player->setMpvPropertyAsync("pause", true) > 0);
+        QTRY_COMPARE(writes.size(), 2);
+        for (const auto &write : writes) QCOMPARE(write[1].toInt(), 0);
+        const auto audio = QStringLiteral(MPVQML_EXAMPLES_DIR) + "/../tests/assets/test_audio1.mp3";
+        QVERIFY(QMetaObject::invokeMethod(player, "openMedia", audio));
+        QTRY_VERIFY(player->property("commandAccepted").toBool());
+        QTRY_COMPARE(player->property("restartCount").toInt(), 1);
+        QStringList stages;
+        for (const auto &detail : details) stages << detail[0].toMap().value("stage").toString();
+        QCOMPARE(stages, (QStringList{"start-file", "file-loaded", "playback-restart"}));
+        player->seekAbsolute(0.2);
+        QTRY_COMPARE(player->property("restartCount").toInt(), 2);
+        QCOMPARE(details.size(), 5);
+        QCOMPARE(details[3][0].toMap().value("stage").toString(), QStringLiteral("seek"));
+        QCOMPARE(details[4][0].toMap().value("entryId"), details[0][0].toMap().value("entryId"));
+        QVERIFY(player->commandAsync({"quit"}) > 0);
+        QTRY_VERIFY(!player->coreAvailable());
+        QCOMPARE(details.last()[0].toMap().value("stage").toString(), QStringLiteral("shutdown"));
+        QCOMPARE(details.at(details.size() - 2)[0].toMap().value("reason").toString(), QStringLiteral("quit"));
+    }
+
+    void checkedRequestsKeepLegacySettlementOrder() {
+        MockMpvController mock;
+        mock.m_autoComplete = false;
+        MpvPlayer player(nullptr, &mock);
+        QStringList order;
+        connect(&player, &MpvPlayer::mpvPropertyReadFinished, this, [&](int, int, const QVariant &value) {
+            QVERIFY(!value.isValid());
+            order << "read";
+        });
+        connect(&player, &MpvPlayer::operationFailed, this, [&](const QString &name, int, const QString &) {
+            order << name;
+        });
+        const int id = player.readMpvPropertyAsync("time-pos");
+        QVERIFY(id > 0);
+        emit mock.asyncCommandFinished(id, 0, {}); // wrong kind cannot consume the ID
+        emit mock.mpvPropertyReadFinished(id, MPV_ERROR_PROPERTY_UNAVAILABLE, {});
+        emit mock.mpvPropertyReadFinished(id, MPV_ERROR_PROPERTY_UNAVAILABLE, {});
+        QTRY_COMPARE(order, (QStringList{"read", "time-pos"}));
+        QCoreApplication::sendPostedEvents(&player, QEvent::MetaCall);
+        QCOMPARE(order.size(), 2);
+
+        const int closed = player.readMpvPropertyAsync("time-pos");
+        QVERIFY(closed > id);
+        emit mock.mpvPropertyReadFinished(closed, 0, 42.0);
+        player.shutdown();
+        QTRY_COMPARE(order, (QStringList{"read", "time-pos", "read"}));
+    }
+
     void migratedExamplesColdConstruct() {
         QFETCH(QString, file);
         QQmlEngine engine;

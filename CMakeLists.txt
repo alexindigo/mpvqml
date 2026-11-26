@@ -34,6 +34,7 @@ qt_add_qml_module(mpvqml
         mpvhookmanager.h
         mpvcontroller.cpp
         mpvcontroller_p.h
+        mpveventclient_p.h
         mpvmediaeffect_p.h
         mpvbackendcore.cpp
         mpvbackendcore_p.h
@@ -96,7 +97,7 @@ install(FILES CMakeLists.txt README.md API.md Architecture.md UPSTREAM.md LICENS
     mpvcontroller_adapter.cpp mpvcontroller_adapter.h
     mpvlogclient.cpp mpvlogclient.h mpvhookmanager.cpp mpvhookmanager.h
     mpvcontroller.cpp mpvcontroller_p.h mpvrenderbridge.cpp mpvrenderbridge_p.h
-    mpvmediaeffect_p.h
+    mpvmediaeffect_p.h mpveventclient_p.h
     mpvbackendcore.cpp mpvbackendcore_p.h
     mpvrenderer.cpp mpvrenderer_p.h
     mpvframecapture.cpp mpvframecapture.h
@@ -160,7 +161,8 @@ if(BUILD_TEST_MODE)
   target_compile_definitions(mpvqml_facade_tests PRIVATE MPVQML_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
   target_link_libraries(mpvqml_helpers_tests PRIVATE Qt6::Gui Qt6::Quick)
   target_compile_definitions(mpvqml_helpers_tests PRIVATE
-      MPVQML_HELPER_VIDEO="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/test_one_video.mp4")
+      MPVQML_HELPER_VIDEO="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/test_one_video.mp4"
+      MPVQML_HELPER_AUDIO="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/test_audio1.mp3")
   target_compile_definitions(mpvqml_renderer_tests PRIVATE
       MPVQML_TEST_VIDEO="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/test_one_video.mp4"
       MPVQML_TEST_RED_VIDEO="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/test_two_video.mp4")
