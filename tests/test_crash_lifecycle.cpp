@@ -74,6 +74,8 @@ private slots:
     if (fixtureName == "coreCreationFailure") flags = FaultCreate;
     if (fixtureName == "coreInitializationFailure") flags = FaultInitialize;
     if (fixtureName == "captureInitializationFailure") flags = FaultInitialize;
+    if (fixtureName == "captureWithoutLua") flags = FaultCaptureWithoutLua;
+    if (fixtureName == "captureDisablesBuiltinScripts") flags = FaultCaptureScriptOptions;
     if (fixtureName == "playbackOverflowLeavesReservedRepliesIntact") flags = FaultPlaybackOverflow;
     if (fixtureName == "captureSuccessReusesReleasedSlot") flags = FaultRetirementBarrier;
     if (fixtureName == "captureIgnoresUncorrelatedEvents") flags = FaultCaptureEvents;
@@ -257,6 +259,26 @@ private slots:
     QCOMPARE(faults.counter(FaultCaptureSeekSubmitted), 1);
     qInfo() << "FAULT_CASE_EXERCISED captureIgnoresUncorrelatedEvents";
   }
+
+  void captureScriptProfile() {
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    const auto path = temp.filePath("frame.png");
+    MpvFrameCapture capture;
+    QSignalSpy replies(&capture, &MpvFrameCapture::finished);
+    QVERIFY(capture.capture(QUrl::fromLocalFile(MPVQML_CRASH_SEEK_VIDEO), 0, 123, 88,
+                            QUrl::fromLocalFile(path)) > 0);
+    QTRY_COMPARE_WITH_TIMEOUT(replies.size(), 1, 8000);
+    QVERIFY2(replies[0][1].toString().isEmpty(), qPrintable(replies[0][2].toString()));
+    QCOMPARE(faults.counter(FaultCaptureScriptDisables), 0x1ffL);
+    const QImage image(path);
+    QCOMPARE(image.size(), QSize(123, 69));
+    QVERIFY(image.pixelColor(61, 34).red() > 210);
+    exercised();
+  }
+
+  void captureWithoutLua() { captureScriptProfile(); }
+  void captureDisablesBuiltinScripts() { captureScriptProfile(); }
 
   void captureRaces(bool cancelWins, bool competitor) {
     QTemporaryDir temp;
@@ -922,6 +944,7 @@ private slots:
   void nativeFaults_data() {
     QTest::addColumn<QString>("name");
     for (const char *name : {"coreCreationFailure", "coreInitializationFailure", "captureInitializationFailure",
+                            "captureWithoutLua", "captureDisablesBuiltinScripts",
                             "playbackOverflowLeavesReservedRepliesIntact",
                             "mixedAdmissionHoldsCancelledSlots", "captureSuccessReusesReleasedSlot",
                             "captureIgnoresUncorrelatedEvents", "captureCancellationWins",

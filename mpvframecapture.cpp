@@ -346,15 +346,20 @@ struct MpvFrameCapture::Job {
       return *stopped;
     const auto diagnostic = core.initialize({
         {"config", "no"}, {"terminal", "no"}, {"load-scripts", "no"},
-        {"ytdl", "no"}, {"access-references", "no"}, {"vo", "libmpv"},
+        {"access-references", "no"}, {"vo", "libmpv"},
         {"vf", "format=rotate=0"},
         {"aid", "no"}, {"sid", "no"}, {"audio-file-auto", "no"}, {"sub-auto", "no"},
         {"pause", "yes"}, {"keep-open", "yes"}, {"hwdec", "no"}, {"vd-lavc-threads", "1"},
         // Limit decoded source pixels independently of the caller's output
         // bounds. 64 MiPixels also admits 8K UHD sources.
         {"vd-lavc-o", "max_pixels=67108864"}, {"cache", "no"},
-        {"osd-level", "0"}, {"osc", "no"}, {"load-stats-overlay", "no"},
-        {"load-osd-console", "no"}, {"load-auto-profiles", "no"}});
+        {"osd-level", "0"},
+        // load-scripts controls user scripts, not these built-ins. Their
+        // options can be absent when Lua or the script is not built in.
+        {"osc", "no", true}, {"ytdl", "no", true}, {"load-stats-overlay", "no", true},
+        {"load-console", "no", true}, {"load-osd-console", "no", true}, {"load-auto-profiles", "no", true},
+        {"load-select", "no", true}, {"load-positioning", "no", true},
+        {"load-commands", "no", true}, {"load-context-menu", "no", true}});
     if (diagnostic.error < 0)
       return {QStringLiteral("initialization-failed"), diagnostic.message, Stage::Core, diagnostic.error};
     if (auto stopped = budget.stop(Stage::Context))

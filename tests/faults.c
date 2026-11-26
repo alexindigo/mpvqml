@@ -46,9 +46,10 @@ int mpvqml_fault_watch_file(const char *path)
 }
 
 static const char *const mpv_symbols[] = {
-    "mpv_create", "mpv_initialize", "mpv_destroy", "mpv_terminate_destroy"
+    "mpv_create", "mpv_set_option_string", "mpv_initialize", "mpv_destroy", "mpv_terminate_destroy"
 };
-static void *bound_symbols[4];
+enum { MpvSymbolCount = sizeof(mpv_symbols) / sizeof(*mpv_symbols) };
+static void *bound_symbols[MpvSymbolCount];
 static atomic_int scope_bound;
 
 int mpvqml_fault_bind_scope(void *consumer)
@@ -65,8 +66,8 @@ int mpvqml_fault_bind_scope(void *consumer)
     if (error || !anchor || !dladdr(anchor, &libmpv)
         || !libmpv.dli_fbase || libmpv.dli_fbase == fixture.dli_fbase)
         return EINVAL;
-    void *resolved[4];
-    for (int i = 0; i < 4; ++i) {
+    void *resolved[MpvSymbolCount];
+    for (int i = 0; i < MpvSymbolCount; ++i) {
         dlerror();
         resolved[i] = dlsym(consumer, mpv_symbols[i]);
         error = dlerror();
@@ -85,7 +86,7 @@ int mpvqml_fault_bind_scope(void *consumer)
 static void *required_symbol(const char *name)
 {
     if (atomic_load_explicit(&scope_bound, memory_order_acquire)) {
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < MpvSymbolCount; ++i)
             if (strcmp(name, mpv_symbols[i]) == 0)
                 return bound_symbols[i];
     }
@@ -208,6 +209,29 @@ mpv_handle *mpv_create(void)
     if (atomic_load(&flags) & FaultCreate)
         return NULL;
     return real_create();
+}
+
+int mpv_set_option_string(mpv_handle *handle, const char *name, const char *value)
+{
+    int (*real_set)(mpv_handle *, const char *, const char *) = required_symbol("mpv_set_option_string");
+    const int result = real_set(handle, name, value);
+    const int mode = atomic_load(&flags);
+    if (!(mode & (FaultCaptureWithoutLua | FaultCaptureScriptOptions)))
+        return result;
+    static const char *const script_options[] = {
+        "osc", "ytdl", "load-stats-overlay", "load-osd-console", "load-auto-profiles",
+        "load-select", "load-positioning", "load-commands", "load-context-menu"
+    };
+    for (size_t i = 0; i < sizeof(script_options) / sizeof(*script_options); ++i) {
+        if (strcmp(name, script_options[i]) == 0 && strcmp(value, "no") == 0) {
+            if (result >= 0 || result == MPV_ERROR_OPTION_NOT_FOUND)
+                atomic_fetch_or(&counters[FaultCaptureScriptDisables], 1L << i);
+            if (mode & FaultCaptureWithoutLua)
+                return MPV_ERROR_OPTION_NOT_FOUND;
+            break;
+        }
+    }
+    return result;
 }
 
 int mpv_initialize(mpv_handle *handle)

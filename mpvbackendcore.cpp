@@ -15,6 +15,7 @@
 #include <cerrno>
 #include <clocale>
 #include <cstdlib>
+#include <cstring>
 #include <dlfcn.h>
 #include <link.h>
 #include <new>
@@ -240,9 +241,9 @@ MpvCoreDiagnostic MpvBackendCore::initialize(std::initializer_list<Option> optio
   }
   if (!candidate)
     return {MpvCoreStage::Create, MPV_ERROR_GENERIC, QStringLiteral("mpv_create returned null: core creation failed")};
-  for (auto [name, value] : options) {
+  for (auto [name, value, allowMissing] : options) {
     const int error = mpv_set_option_string(candidate.get(), name, value);
-    if (error < 0)
+    if (error < 0 && !(allowMissing && error == MPV_ERROR_OPTION_NOT_FOUND))
       return {MpvCoreStage::Option, error, QString::fromLatin1(name) + ": " + mpv_error_string(error)};
   }
   const int error = mpv_initialize(candidate.get());

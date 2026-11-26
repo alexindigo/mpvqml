@@ -21,7 +21,7 @@ struct MpvCoreDiagnostic {
 class MpvBackendCore final {
 public:
   enum class Retirement { Shared, Exclusive };
-  struct Option { const char *name; const char *value; };
+  struct Option { const char *name; const char *value; bool allowMissing = false; };
   static constexpr int Capacity = 32;
 
   static std::unique_ptr<MpvBackendCore> reserve(Retirement mode, MpvCoreDiagnostic &diagnostic);
