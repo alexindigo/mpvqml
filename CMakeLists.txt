@@ -42,6 +42,11 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
+set(capture_wire capture/wire.cpp capture/wire.h capture/capture-wire.cpp capture/capture-wire.h)
+add_executable(mpvqml-capture capture/main.cpp ${capture_wire})
+target_link_libraries(mpvqml-capture PRIVATE Qt6::Core Qt6::Gui PkgConfig::MPVQML_MPV)
+file(RELATIVE_PATH capture_from_lib "${CMAKE_INSTALL_FULL_LIBDIR}" "${CMAKE_INSTALL_FULL_LIBEXECDIR}/mpvqml-capture")
+
 # ==================== PRODUCTION QML MODULE ====================
 qt_add_qml_module(mpvqml
     URI MpvQml
@@ -69,7 +74,14 @@ qt_add_qml_module(mpvqml
         mpvrenderer_p.h
         mpvframecapture.cpp
         mpvframecapture.h
+        capture/helper.cpp capture/helper.h capture/pool.cpp capture/pool.h ${capture_wire}
 )
+
+target_compile_definitions(mpvqml PRIVATE
+    MPV_CAPTURE_FROM_LIB="${capture_from_lib}"
+    MPV_CAPTURE_BUILD_LIB="$<TARGET_FILE:mpvqml>"
+    MPV_CAPTURE_BUILD_EXECUTABLE="$<TARGET_FILE:mpvqml-capture>")
+add_dependencies(mpvqml mpvqml-capture)
 
 set_target_properties(mpvqml PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 0.3)
 
@@ -91,6 +103,7 @@ install(TARGETS mpvqml
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
+install(TARGETS mpvqml-capture RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR})
 
 # The module plugin and backing library share the chosen prefix.
 set_target_properties(mpvqmlplugin PROPERTIES INSTALL_RPATH "$ORIGIN/../../..")
@@ -135,6 +148,8 @@ install(FILES CMakeLists.txt README.md API.md Architecture.md FeatureMapping.md 
     DESTINATION ${CMAKE_INSTALL_DATADIR}/mpvqml/source
 )
 install(FILES cmake/mpvqmlConfig.cmake.in DESTINATION ${CMAKE_INSTALL_DATADIR}/mpvqml/source/cmake)
+install(FILES capture/main.cpp capture/helper.cpp capture/helper.h capture/pool.cpp capture/pool.h ${capture_wire}
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/mpvqml/source/capture)
 install(FILES LICENSES/LGPL-3.0-only.txt
     DESTINATION ${CMAKE_INSTALL_DATADIR}/mpvqml/source/LICENSES
 )
@@ -209,6 +224,7 @@ if(BUILD_TEST_MODE)
   target_compile_definitions(mpvqml_crash_tests PRIVATE MPVQML_FAULT_LIBRARY="$<TARGET_FILE:mpvqml_test_faults>")
   target_compile_definitions(mpvqml_crash_tests PRIVATE
       MPVQML_CRASH_VIDEO="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/test_one_video.mp4"
+      MPVQML_TEST_ASSETS="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets"
       MPVQML_CRASH_SEEK_VIDEO="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/test_frame_seek.webm")
   add_library(mpvqml_test_unload_consumer SHARED tests/unload-consumer.cpp)
   set_target_properties(mpvqml_test_unload_consumer PROPERTIES AUTOMOC OFF)

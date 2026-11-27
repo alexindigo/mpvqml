@@ -16,6 +16,9 @@ ffmpeg -f lavfi -i color=c=red:s=320x180:r=10:d=1 -f lavfi -i color=c=blue:s=320
     -filter_complex '[0:v][1:v]concat=n=2:v=1:a=0' -an -c:v libvpx-vp9 -pix_fmt yuv420p \
     "${ASSETS_DIR}/test_frame_seek.webm" -y -loglevel error
 
+ffmpeg -f lavfi -i color=yellow:s=3840x2160:r=1:d=1 -frames:v 1 -c:v libx264 -threads 1 \
+    -pix_fmt yuv420p "${ASSETS_DIR}/test_frame_large.mp4" -y -loglevel error
+
 # Test audio files
 ffmpeg -f lavfi -i "sine=frequency=440:duration=1" -c:a libmp3lame "${ASSETS_DIR}/test_audio1.mp3" -y -loglevel quiet
 ffmpeg -f lavfi -i "sine=frequency=880:duration=1" -c:a libvorbis "${ASSETS_DIR}/test_audio2.ogg" -y -loglevel quiet

@@ -15,6 +15,7 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QSignalSpy>
+#include <QThread>
 #include <QTimer>
 #include <QtTest>
 #include <array>
@@ -22,6 +23,7 @@
 #include <clocale>
 #include <dlfcn.h>
 #include <memory>
+#include <signal.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -215,11 +217,9 @@ private slots:
     QVERIFY(capture.cancel(first));
     QVERIFY(!capture.cancel(first));
     QVERIFY(capture.cancel(second));
-    QTRY_COMPARE(replies.size(), 2);
-    QCOMPARE(replies[0][0].toInt(), first);
-    QCOMPARE(replies[0][1].toString(), QStringLiteral("cancelled"));
-    QCOMPARE(replies[1][0].toInt(), second);
-    QCOMPARE(replies[1][1].toString(), QStringLiteral("cancelled"));
+    // A worker may already have been killed; the owner has not reaped it
+    // yet because this thread has not pumped Qt's retirement notifications.
+    QVERIFY(replies.isEmpty());
     QVERIFY(capacity.isEmpty());
     QVERIFY(!capture.capacityAvailable());
     QVERIFY(!other.capacityAvailable());
@@ -232,10 +232,13 @@ private slots:
     MpvBackendWorker refusedPlayback;
     QCOMPARE(refusedPlayback.initialize().coreStage, MpvCoreStage::Capacity);
     QCOMPARE(MpvBackendCore::outstandingReservations(), MpvBackendCore::Capacity);
-    faults.release();
     QTRY_COMPARE(capacity.size(), 2);
     QCOMPARE(replies.size(), 2);
-    QCOMPARE(faults.counter(FaultRetirementCompleted), 2L);
+    QCOMPARE(replies[0][0].toInt(), first);
+    QCOMPARE(replies[0][1].toString(), QStringLiteral("cancelled"));
+    QCOMPARE(replies[1][0].toInt(), second);
+    QCOMPARE(replies[1][1].toString(), QStringLiteral("cancelled"));
+    QCOMPARE(faults.counter(FaultRetirementCompleted), 0L);
     QVERIFY(capture.capacityAvailable());
     QVERIFY(other.capacityAvailable());
     QVERIFY(!QFile::exists(a.toLocalFile()) && !QFile::exists(b.toLocalFile()));
@@ -297,7 +300,6 @@ private slots:
     int next = 0;
     const auto nextPath = temp.filePath("after-cancel.png");
     if (cancelWins) {
-      QTRY_COMPARE(replies.size(), 1);
       QVERIFY(releases.isEmpty());
       next = capture.capture(QUrl::fromLocalFile(MPVQML_CRASH_SEEK_VIDEO), 0, 123, 88,
                              QUrl::fromLocalFile(nextPath));
@@ -351,14 +353,16 @@ private slots:
     struct Release { ~Release() { faults.release(); } } release;
     QTRY_COMPARE_WITH_TIMEOUT(faults.counter(publishStarted ? FaultCapturePublishEntered : FaultCaptureRenderEntered), 1, 5000);
     // Hold until the whole admission budget has elapsed, not to win a race.
-    QTest::qWait(7100);
-    QVERIFY(releases.isEmpty());
-    faults.release();
-    QTRY_COMPARE_WITH_TIMEOUT(releases.size(), 1, 5000);
+    if (publishStarted) {
+      QTest::qWait(7100);
+      QVERIFY(releases.isEmpty());
+      faults.release();
+    }
+    QTRY_COMPARE_WITH_TIMEOUT(releases.size(), 1, 8500);
     QCOMPARE(details.size(), 1);
     const auto outcome = details[0][1].toMap();
-    QCOMPARE(outcome["stage"].toString(), publishStarted ? "complete" : "encode");
-    QCOMPARE(outcome["code"].toString(), publishStarted ? "" : "timeout");
+    QCOMPARE(outcome["stage"].toString(), publishStarted ? "complete" : "helper");
+    QCOMPARE(outcome["code"].toString(), publishStarted ? "" : "deadline");
     QCOMPARE(QFile::exists(path), publishStarted);
     QCOMPARE(QDir(temp.path()).entryList(QDir::Files | QDir::Hidden).size(), publishStarted ? 1 : 0);
     qInfo().noquote() << "FAULT_CASE_EXERCISED" << fixtureName;
@@ -366,6 +370,108 @@ private slots:
 
   void captureExpiresBeforeEncoding() { captureDeadline(false); }
   void capturePublishesPastDeadline() { captureDeadline(true); }
+
+  void captureHelperFault(const QString &expectedCode) {
+    QTemporaryDir staging;
+    QVERIFY(staging.isValid());
+    MpvFrameCapture capture;
+    QSignalSpy finished(&capture, &MpvFrameCapture::finishedDetailed);
+    QSignalSpy released(&capture, &MpvFrameCapture::capacityReleased);
+    const auto source = QUrl::fromLocalFile(QStringLiteral(MPVQML_TEST_ASSETS "/test_frame_seek.webm"));
+    const auto failedPath = staging.filePath("failed.png");
+    const auto recoveredPath = staging.filePath("recovered.png");
+    QElapsedTimer elapsed;
+    elapsed.start();
+    const int request = capture.capture(source, 0, 64, 64, QUrl::fromLocalFile(failedPath));
+    QVERIFY(request > 0);
+    const auto markerPath = qEnvironmentVariable("MPVQML_TEST_CAPTURE_MARKER");
+    if (expectedCode == "deadline") {
+      QTRY_VERIFY_WITH_TIMEOUT(QFileInfo(markerPath).size() > 0, 4000);
+      QFile marker(markerPath);
+      QVERIFY(marker.open(QIODevice::ReadOnly));
+      const auto pid = marker.readAll().trimmed().toInt();
+      QVERIFY(pid > 1 && pid != ::getpid());
+      QCOMPARE(::kill(pid, 0), 0);
+      // No GUI events while the absolute deadline expires. A GUI timer
+      // alone would leave the native process alive until this test yields.
+      QThread::msleep(qMax<qint64>(1, 7300 - elapsed.elapsed()));
+      QFile status(QStringLiteral("/proc/%1/stat").arg(pid));
+      if (status.open(QIODevice::ReadOnly)) {
+        const auto stat = status.readAll();
+        QCOMPARE(stat.mid(stat.lastIndexOf(')') + 2, 1), QByteArray("Z"));
+      } else {
+        QCOMPARE(::kill(pid, 0), -1);
+        QCOMPARE(errno, ESRCH);
+      }
+      QVERIFY(finished.isEmpty());
+    }
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 9000);
+    const auto outcome = finished.at(0).at(1).toMap();
+    QCOMPARE(finished.at(0).at(0).toInt(), request);
+    QCOMPARE(outcome.value("code").toString(), expectedCode);
+    QVERIFY(!outcome.value("reason").toString().isEmpty());
+    QCOMPARE(outcome.value("stage").toString(), QStringLiteral("helper"));
+    QTRY_COMPARE_WITH_TIMEOUT(released.size(), 1, 2000);
+    QCOMPARE(released.at(0).at(0).toInt(), request);
+    QVERIFY(!QFileInfo::exists(failedPath));
+    QFile marker(markerPath);
+    QVERIFY(marker.open(QIODevice::ReadOnly));
+    const auto pid = marker.readAll().trimmed().toInt();
+    QVERIFY(pid > 1 && pid != ::getpid());
+    QCOMPARE(::kill(pid, 0), -1);
+    QCOMPARE(errno, ESRCH);
+    const int retry = capture.capture(source, 0.75, 64, 64, QUrl::fromLocalFile(recoveredPath));
+    QVERIFY(retry > request);
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 2, 8000);
+    QCOMPARE(finished.at(1).at(0).toInt(), retry);
+    QCOMPARE(finished.at(1).at(1).toMap().value("code").toString(), QString());
+    const QImage image(recoveredPath);
+    QCOMPARE(image.size(), QSize(64, 36));
+    QVERIFY(image.pixelColor(32, 18).blue() > 210);
+    QTRY_COMPARE_WITH_TIMEOUT(released.size(), 2, 2000);
+    exercised();
+  }
+
+  void captureHelperAbort() { captureHelperFault(QStringLiteral("helper-crashed")); }
+  void captureHelperDeadline() { captureHelperFault(QStringLiteral("deadline")); }
+
+  void captureHelperQueuedCancel() {
+    QTemporaryDir staging;
+    QVERIFY(staging.isValid());
+    MpvFrameCapture running, queued;
+    QSignalSpy finished(&queued, &MpvFrameCapture::finishedDetailed);
+    QSignalSpy released(&queued, &MpvFrameCapture::capacityReleased);
+    QSignalSpy runningFinished(&running, &MpvFrameCapture::finishedDetailed);
+    QSignalSpy runningReleased(&running, &MpvFrameCapture::capacityReleased);
+    const auto source = QUrl::fromLocalFile(QStringLiteral(MPVQML_TEST_ASSETS "/test_frame_seek.webm"));
+    const auto submit = [&](MpvFrameCapture &owner, const QString &name) {
+      return owner.capture(source, 0, 64, 64, QUrl::fromLocalFile(staging.filePath(name)));
+    };
+    const int first = submit(running, "first.png");
+    const int second = submit(running, "second.png");
+    QVERIFY(first > 0 && second > first);
+    const auto marker = qEnvironmentVariable("MPVQML_TEST_CAPTURE_MARKER");
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo(marker + ".2").size() > 0, 4000);
+    const int third = submit(queued, "third.png");
+    QVERIFY(third > 0);
+    QTest::qWait(750);
+    QVERIFY2(!QFileInfo::exists(marker + ".3"), "third capture entered native code instead of queuing");
+    QVERIFY(queued.cancel(third));
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(released.size(), 1, 2000);
+    QCOMPARE(finished.at(0).at(0).toInt(), third);
+    QCOMPARE(finished.at(0).at(1).toMap().value("code").toString(), QStringLiteral("cancelled"));
+    QCOMPARE(released.at(0).at(0).toInt(), third);
+    QVERIFY(running.cancel(first));
+    QVERIFY(running.cancel(second));
+    QTRY_COMPARE_WITH_TIMEOUT(runningFinished.size(), 2, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(runningReleased.size(), 2, 2000);
+    for (const auto &reply : runningFinished)
+      QCOMPARE(reply.at(1).toMap().value("code").toString(), QStringLiteral("cancelled"));
+    QCOMPARE(QDir(staging.path()).entryList(QDir::Files | QDir::Hidden), QStringList());
+    QVERIFY(!QFileInfo::exists(marker + ".3"));
+    exercised();
+  }
 
   void captureCancellationBeforeRetiredDelivery() {
     QTemporaryDir temp;
@@ -422,7 +528,7 @@ private slots:
       second = capture.capture(source, 0, 64, 64, b);
     });
     QTRY_COMPARE(faults.counter(FaultRetirementEntered), 1L);
-    QVERIFY(QFile::exists(a.toLocalFile()));
+    QVERIFY(!QFile::exists(a.toLocalFile())); // Publication follows native teardown.
     QVERIFY(replies.isEmpty());
     QVERIFY(capacity.isEmpty());
     QVERIFY(!capture.capacityAvailable());
@@ -963,6 +1069,7 @@ private slots:
                             "capturePublicationWins", "captureCompetingWriter",
                             "captureCancellationBeforeRetiredDelivery",
                             "captureExpiresBeforeEncoding", "capturePublishesPastDeadline",
+                            "captureHelperAbort", "captureHelperDeadline", "captureHelperQueuedCancel",
                             "partialRetirementBootstrapFailure", "workerStartupFailure",
                             "bothWorkersBlockedAndAllLiveLeasesReclaimed", "workerTlsCleanupOutlivesFacade",
                             "moduleUnloadWhileBlocked", "publicCoreCreationFailure",
@@ -977,6 +1084,8 @@ private slots:
 
   void nativeFaults() {
     QFETCH(QString, name);
+    QTemporaryDir faultMarkers;
+    QVERIFY(faultMarkers.isValid());
     QProcess child;
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
     environment.remove("LD_PRELOAD");
@@ -995,6 +1104,18 @@ private slots:
     }
 #endif
     environment.insert("LD_PRELOAD", preload);
+    const auto captureMarker = faultMarkers.filePath("native-pid");
+    if (name.startsWith("capture") || name == "mixedAdmissionHoldsCancelledSlots") {
+      QFile controls(faultMarkers.filePath("controls"));
+      QVERIFY(controls.open(QIODevice::ReadWrite | QIODevice::NewOnly));
+      QVERIFY(controls.resize(4096));
+      environment.insert("MPVQML_TEST_CAPTURE_CONTROLS", controls.fileName());
+    }
+    if (name.startsWith("captureHelper")) {
+      environment.insert("MPVQML_TEST_CAPTURE_FAULT", name == "captureHelperAbort" ? "abort"
+          : name == "captureHelperDeadline" ? "hang" : "hold");
+      environment.insert("MPVQML_TEST_CAPTURE_MARKER", captureMarker);
+    }
     environment.insert("QT_FORCE_STDERR_LOGGING", "1");
     if (name.startsWith("capture") || name == "mixedAdmissionHoldsCancelledSlots") {
       environment.remove("DISPLAY");
@@ -1008,6 +1129,7 @@ private slots:
         ? QStringLiteral(MPVQML_UNLOAD_EXECUTABLE) : QCoreApplication::applicationFilePath();
     child.start(executable, QStringList{"--fixture", name});
     QVERIFY2(child.waitForStarted(5000), qPrintable(child.errorString()));
+    const auto consumerPid = child.processId();
     if (!child.waitForFinished(30000)) {
       child.kill(); // this owned native fixture is not qs or the locker
       child.waitForFinished(5000);
@@ -1015,6 +1137,8 @@ private slots:
     }
     const QByteArray output = child.readAll();
     qInfo().noquote() << QString::fromUtf8(output);
+    if (QFile marker(captureMarker); marker.open(QIODevice::ReadOnly))
+      qInfo().noquote() << "Capture fault PID:" << marker.readAll().trimmed() << "consumer:" << consumerPid;
     QCOMPARE(child.exitStatus(), QProcess::NormalExit);
     QCOMPARE(child.exitCode(), 0);
     QVERIFY2(output.contains(("FAULT_CASE_EXERCISED " + name).toUtf8()),

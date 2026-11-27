@@ -23,8 +23,8 @@ private implementation. There is no system MpvQt inheritance or linkage.
 
 Only a reserved `MpvBackendCore` can create and initialize a core. It serializes
 creation in this library and sets the process's `LC_NUMERIC` to `C` before
-libmpv sees it. The host must not change this locale while using libmpv. Playback
-and frame capture supply their own option profiles; the owner records locale,
+libmpv sees it. The host must not change this locale while using playback.
+The playback owner records locale,
 creation, option and initialization failures with the native code where supplied.
 Unpublished candidates are destroyed on the creating worker. Log and hook clients
 attach to an already initialized playback core.
@@ -164,28 +164,47 @@ timeout that drops live handles.
 ## Source and verification
 
 `MpvFrameCapture` is a separate non-item facade for a one-shot transaction.
-It uses the shared native admission/DSO pin budget directly, not the player
-command queue or GL renderer. Each bounded job owns a regular input descriptor,
-an exclusive core and a software memory render context on the same worker.
-Job outcome (including early cancellation) is separate from native retirement.
-The worker frees the render context, terminates the core while the input
-descriptor is still live, closes the input and releases the shared slot. Guarded
-GUI delivery then frees the local slot before non-cancelled completion and
-capacity notification. Cancellation and retirement callbacks share one terminal
-delivery ledger, keeping cancellation before capacity regardless of which was
-queued first. Destruction does not join the worker.
+It reserves from the shared admission/DSO pin budget without creating a native
+capture handle in the consumer. A bounded FIFO feeds two lazy helper slots per
+owner thread; each helper is reused for at most 32 transactions. Filesystem
+workers open a regular input and publish the final PNG off the GUI thread.
+There is no player command-queue or GL renderer involvement.
+
+The imvqml-derived transport uses a versioned, length-prefixed
+`SOCK_SEQPACKET` header with an independent nonzero wire serial. The consumer
+passes a read-only source descriptor and a growth-sealed output memfd, not
+paths or a whole file copy. The helper sees only its socket at exec besides
+standard streams. The consumer accepts pixels only with a correlated reply,
+matching bounded geometry and exact byte length, and immutable seals on the
+original output descriptor. The helper is resolved from the mapped backing
+library with a prefix-relative libexec path, not from cwd or `PATH`.
 
 The private frame transaction requires a matching command reply and an
 ordered file-loaded/restart pair for initial readiness, or a seek/restart
 pair for requested-position readiness. Software frame handoff keeps the
 native VO progressing while events are pending. Terminal details are owned
-values, separate from native event storage. A 7-second cooperative budget
-checks work boundaries; it cannot preempt native or filesystem calls.
+values, separate from native event storage. Only the helper initializes and
+terminates the capture core; it frees the software render context and retires
+the core while the input descriptor remains live, before replying. It limits
+virtual address space to 1.5 GiB and glibc malloc to two arenas before native
+startup. Bounded native diagnostics are attached to failures only.
+
+A seven-second monotonic budget starts at admission. The GUI pool rejects late
+replies and kills timed-out children; the helper's kernel watchdog also kills
+the process if the GUI event loop is stalled. Crash, timeout, protocol error
+and running cancellation retire the child, with replacement on demand. The
+job retains capacity until the process is reaped and any application-side
+work retires. The terminal ledger keeps cancellation before capacity release
+without waiting for reaping. Destruction drops late delivery and does not
+join native work. This is crash containment, not an OS sandbox.
 
 The encoder writes a temporary PNG beside the target in a descriptor-held
 directory. Cancellation and publication compete at one gate. Publication
 atomically links the finished PNG into an unused caller-owned name without
-replacing aliases or competing writers, then retires the temporary name.
+replacing aliases or competing writers, then retires the temporary name. This
+publication gate is in the consumer: the helper cannot publish a file. The
+deadline is cooperative for application-side filesystem operations and does
+not change an already committed publication into a timeout.
 The guiless suite observes real first/seek pixels through the registered QML
 type; isolated fault children hold native and publication boundaries.
 

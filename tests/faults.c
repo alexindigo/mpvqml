@@ -3,6 +3,7 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <mpv/client.h>
 #include <mpv/render.h>
 #include <pthread.h>
@@ -11,13 +12,40 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 /* All interposition is confined to an explicitly preloaded native child. */
 static atomic_int armed;
-static atomic_int flags;
 static atomic_int failure_thread;
-static atomic_long counters[FaultCounterCount];
+struct FaultControl {
+    atomic_int fault_flags;
+    atomic_int barrier_released;
+    atomic_long fault_counters[FaultCounterCount];
+};
+static struct FaultControl local_control, *control = &local_control;
+#define flags (control->fault_flags)
+#define counters (control->fault_counters)
+
+// Cross exec only for explicit capture tests. Playback-only fixtures keep
+// their existing in-process state and barriers.
+__attribute__((constructor)) static void map_capture_controls(void)
+{
+    const char *path = getenv("MPVQML_TEST_CAPTURE_CONTROLS");
+    if (!path)
+        return;
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    struct stat info;
+    if (fd < 0 || fstat(fd, &info) < 0 || info.st_size < sizeof(*control))
+        _exit(91);
+    void *mapping = mmap(NULL, sizeof(*control), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (mapping == MAP_FAILED)
+        _exit(91);
+    control = mapping;
+}
 static pthread_mutex_t barrier_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t barrier_changed = PTHREAD_COND_INITIALIZER;
 static int released;
@@ -112,6 +140,15 @@ long mpvqml_fault_counter(int counter)
 
 static void await_release(int entered, int completed)
 {
+    if (control != &local_control) {
+        atomic_fetch_add(&counters[entered], 1);
+        const struct timespec step = {0, 1000000};
+        while (!atomic_load(&control->barrier_released))
+            nanosleep(&step, NULL);
+        if (completed >= 0)
+            atomic_fetch_add(&counters[completed], 1);
+        return;
+    }
     pthread_mutex_lock(&barrier_mutex);
     atomic_fetch_add(&counters[entered], 1);
     while (!released)
@@ -123,6 +160,7 @@ static void await_release(int entered, int completed)
 
 void mpvqml_fault_release(void)
 {
+    atomic_store(&control->barrier_released, 1);
     pthread_mutex_lock(&barrier_mutex);
     released = 1;
     pthread_cond_broadcast(&barrier_changed);
@@ -338,6 +376,36 @@ mpv_event *mpv_wait_event(mpv_handle *handle, double timeout)
 int mpv_render_context_render(mpv_render_context *context, mpv_render_param *parameters)
 {
     int (*real_render)(mpv_render_context *, mpv_render_param *) = required_symbol("mpv_render_context_render");
+    const char *fault = getenv("MPVQML_TEST_CAPTURE_FAULT");
+    const char *marker = getenv("MPVQML_TEST_CAPTURE_MARKER");
+    if (fault && marker) {
+        for (mpv_render_param *p = parameters; p->type; ++p) {
+            if (p->type != MPV_RENDER_PARAM_SW_POINTER)
+                continue;
+            // Claim once across all processes, including a replacement helper.
+            int fd = -1;
+            if (!strcmp(fault, "hold")) {
+                for (int n = 1; n <= 3 && fd < 0; ++n) {
+                    char path[4096];
+                    if (snprintf(path, sizeof(path), "%s.%d", marker, n) >= (int)sizeof(path))
+                        break;
+                    fd = open(path, O_WRONLY | O_CLOEXEC | O_CREAT | O_EXCL, 0600);
+                }
+            } else {
+                fd = open(marker, O_WRONLY | O_CLOEXEC | O_CREAT | O_EXCL, 0600);
+            }
+            if (fd >= 0) {
+                dprintf(fd, "%ld\n", (long)getpid());
+                close(fd);
+                if (!strcmp(fault, "abort"))
+                    abort();
+                if (!strcmp(fault, "hang") || !strcmp(fault, "hold"))
+                    for (;;)
+                        pause();
+            }
+            break;
+        }
+    }
     if (atomic_load(&flags) & FaultCaptureBeforePublish) {
         for (mpv_render_param *p = parameters; p->type; ++p) {
             if (p->type == MPV_RENDER_PARAM_SW_POINTER) {

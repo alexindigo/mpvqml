@@ -32,6 +32,15 @@ framework are not imported. The stock system MpvQt library/reference remains
 unmodified. Private backend types use `MpvQmlPrivate`; public consumption
 remains through `MpvPlayer` and its documented interface seam.
 
+## Capture process isolation
+
+`capture/{helper,pool,wire}.{h,cpp}` derives from the identically named
+imvqml private files at [`81bf0da0325b100bd017913af6c7bb47b3807fff`](https://github.com/alexindigo/imvqml/commit/81bf0da0325b100bd017913af6c7bb47b3807fff),
+under LGPL-3.0-only. The capture-specific magic and payload distinguish
+the two helpers; process startup retains the Qt 6.5 floor. The helper also
+uses imvqml's kernel watchdog, allocator arena cap and bounded failure-only
+logging, with the existing mpvqml software frame capture transaction.
+
 ## Known libmpv workarounds
 
 | # | Upstream defect | Symptom | mpvqml workaround | Removal trigger |

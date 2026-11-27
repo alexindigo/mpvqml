@@ -7,6 +7,7 @@
 #include <QQmlEngine>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QtEndian>
 #include <QtTest>
 #include <clocale>
 #include <memory>
@@ -90,6 +91,31 @@ private slots:
     }
   }
 
+  void captureLargeVideoWithoutCopyingInput() {
+    // A valid trailing MP4 free box, with an actual file size beyond 1 GiB.
+    // Only its header occupies disk blocks. Capture must use the open source
+    // descriptor rather than allocate a buffer the size of the media file.
+    QFile input(target("sparse-video").toLocalFile());
+    QVERIFY(QFile::copy(asset("test_frame_large.mp4").toLocalFile(), input.fileName()));
+    QVERIFY(input.open(QIODevice::ReadWrite | QIODevice::Append));
+    constexpr quint32 freeBoxSize = 1024u * 1024u * 1024u;
+    char header[8] = {0, 0, 0, 0, 'f', 'r', 'e', 'e'};
+    qToBigEndian(freeBoxSize, header);
+    const auto size = input.size();
+    QCOMPARE(input.write(header, sizeof header), qint64(sizeof header));
+    QVERIFY(input.resize(size + freeBoxSize));
+    input.close();
+    const auto output = target("sparse-preview.png");
+    QSignalSpy done(capture.get(), SIGNAL(finished(int,QString,QString)));
+    QVERIFY(start(QUrl::fromLocalFile(input.fileName()), 0, output) > 0);
+    QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 8000);
+    QVERIFY2(done[0][1].toString().isEmpty(), qPrintable(done[0][2].toString()));
+    const QImage image(output.toLocalFile());
+    QCOMPARE(image.size(), QSize(123, 69));
+    const auto yellow = image.pixelColor(30, 17);
+    QVERIFY(yellow.red() > 128 && yellow.green() > 128 && yellow.blue() < 128);
+  }
+
   void documentedCaptureExampleStagesPixels() {
     QFile doc(QStringLiteral(TEST_ASSET_PATH "/../../API.md"));
     QVERIFY(doc.open(QIODevice::ReadOnly));
@@ -157,7 +183,7 @@ private slots:
     QCOMPARE(image.size(), QSize(123, 69));
     const auto pixel = image.pixelColor(image.width() / 2, image.height() / 2);
     QVERIFY2(pixel.blue() > 210 && pixel.red() < 30, qPrintable(pixel.name()));
-    QCOMPARE(QByteArray(std::setlocale(LC_NUMERIC, nullptr)), QByteArray("C"));
+    QCOMPARE(QByteArray(std::setlocale(LC_NUMERIC, nullptr)), active);
     qInfo() << "NON_C_CAPTURE_EXERCISED";
   }
 

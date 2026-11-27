@@ -38,6 +38,7 @@ private:
   struct Dispatch;
   struct Job;
   struct Outcome;
+  class Queue;
   Admission admit(const QUrl &source, double fraction, int maxWidth, int maxHeight,
                   const QUrl &destination);
   void retired(const std::shared_ptr<Job> &job, const Outcome &outcome);
