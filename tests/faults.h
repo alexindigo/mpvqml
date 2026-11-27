@@ -15,7 +15,8 @@ enum MpvQmlFault {
   FaultCapturePublish = 1024,
   FaultPlaybackOverflow = 2048,
   FaultCaptureWithoutLua = 4096,
-  FaultCaptureScriptOptions = 8192
+  FaultCaptureScriptOptions = 8192,
+  FaultCaptureLateWorker = 16384
 };
 
 enum MpvQmlFaultCounter {

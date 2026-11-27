@@ -520,6 +520,16 @@ static void *bootstrap_start(void *argument)
     return result;
 }
 
+static void *late_capture_worker(void *argument)
+{
+    const struct BootstrapStart start = *(struct BootstrapStart *)argument;
+    free(argument);
+    struct timespec delay = {7, 200000000};
+    while (nanosleep(&delay, &delay) < 0 && errno == EINTR)
+        ;
+    return start.function(start.argument);
+}
+
 int pthread_create(pthread_t *thread, const pthread_attr_t *attributes,
                    void *(*function)(void *), void *argument)
 {
@@ -533,12 +543,13 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attributes,
         return EAGAIN;
     }
     /* The first two armed threads are the production retirement bootstrap. */
-    if (attempt <= 2) {
+    const int late_capture = attempt == 3 && (atomic_load(&flags) & FaultCaptureLateWorker);
+    if (attempt <= 2 || late_capture) {
         struct BootstrapStart *start = malloc(sizeof(*start));
         if (!start)
             return ENOMEM;
         *start = (struct BootstrapStart){function, argument};
-        int error = real_create(thread, attributes, bootstrap_start, start);
+        int error = real_create(thread, attributes, late_capture ? late_capture_worker : bootstrap_start, start);
         if (error)
             free(start);
         return error;

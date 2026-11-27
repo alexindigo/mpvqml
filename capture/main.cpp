@@ -20,6 +20,10 @@
 #include <malloc.h>
 #endif
 
+#ifndef __has_feature
+#define __has_feature(x) 0
+#endif
+
 namespace {
 using namespace MpvCapture;
 
@@ -327,11 +331,22 @@ int main() {
   if (!::mallopt(M_ARENA_MAX, 2))
     return 2;
 #endif
-  constexpr rlim_t addressBudget = 1536ull * 1024 * 1024;
-  const rlimit address{addressBudget, addressBudget}, noCore{0, 0};
-  if (::setrlimit(RLIMIT_AS, &address) || ::setrlimit(RLIMIT_CORE, &noCore)
-      || !std::setlocale(LC_NUMERIC, "C"))
+  const rlimit noCore{0, 0};
+  if (::setrlimit(RLIMIT_CORE, &noCore) || !std::setlocale(LC_NUMERIC, "C"))
     return 2;
+#if !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__) \
+    && !__has_feature(address_sanitizer) && !__has_feature(thread_sanitizer) && !__has_feature(memory_sanitizer)
+  // Treat the helper budget as a ceiling, not permission to raise either
+  // inherited limit. Sanitizer shadow memory requires a separate AS policy.
+  constexpr rlim_t addressBudget = 1536ull * 1024 * 1024;
+  rlimit address{};
+  if (::getrlimit(RLIMIT_AS, &address))
+    return 2;
+  address.rlim_cur = qMin(address.rlim_cur, addressBudget);
+  address.rlim_max = qMin(address.rlim_max, addressBudget);
+  if (::setrlimit(RLIMIT_AS, &address))
+    return 2;
+#endif
   sigevent expiry{};
   expiry.sigev_notify = SIGEV_SIGNAL;
   expiry.sigev_signo = SIGKILL;
@@ -359,10 +374,12 @@ int main() {
     frame.fds.clear();
     frame.body = encodeResult(result, size);
     frame.kind = Kind::Reply;
-    if (socket.send(frame) != Io::Ok)
-      return 1;
+    // Reliability of the next request must not depend on the previous
+    // request's watchdog. The pool still rejects an expired reply.
     const itimerspec idle{};
     if (::timer_settime(watchdog, 0, &idle, nullptr))
       return 2;
+    if (socket.send(frame) != Io::Ok)
+      return 1;
   }
 }

@@ -27,14 +27,14 @@ public:
         connect(&m_process, &QProcess::finished, this, [this] { reportExit(); });
         connect(&m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
             if (error == QProcess::FailedToStart)
-                reportExit();
+                reportExit(true);
         });
     }
 
     void start() override {
         auto fd = startChild(m_process, m_executable);
         if (!fd) {
-            reportExit();
+            reportExit(true);
             return;
         }
         m_peer = std::make_unique<SeqPacket>(std::move(fd));
@@ -63,6 +63,8 @@ public:
         if (!m_peer)
             return Io::Closed;
         const auto status = m_peer->receive(frame);
+        if (status == Io::Closed && m_process.state() == QProcess::Starting)
+            return Io::Again; // Let QProcess classify exec failure before reporting EOF.
         m_read->setEnabled(!retired() && (status == Io::Ok || status == Io::Again));
         return status;
     }
@@ -92,9 +94,11 @@ private:
 
 } // namespace
 
-void Child::reportExit() {
-    if (!std::exchange(m_retired, true))
+void Child::reportExit(bool launchFailed) {
+    if (!std::exchange(m_retired, true)) {
+        m_launchFailed = launchFailed;
         emit exited();
+    }
 }
 
 struct Pool::State {
@@ -163,7 +167,7 @@ struct Pool::State {
         slot.child = factory ? factory() : nullptr;
         slot.used = 0;
         if (!slot.child) {
-            fail(slot, failure("helper-crashed", "Could not create capture helper process ownership"));
+            fail(slot, failure("helper-unavailable", "Could not create capture helper process ownership"));
             return;
         }
         const QPointer<Child> generation(slot.child.get());
@@ -219,7 +223,9 @@ struct Pool::State {
             return;
         }
         if (status == Io::Closed || status == Io::Error) {
-            fail(slot, failure("helper-crashed", "Capture helper response channel closed"));
+            fail(slot, slot.child->launchFailed()
+                ? failure("helper-unavailable", "Could not start capture helper")
+                : failure("helper-crashed", "Capture helper response channel closed"));
             return;
         }
         if (status != Io::Ok || !slot.work || slot.work->pending || frame.kind != Kind::Reply ||

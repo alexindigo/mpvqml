@@ -18,6 +18,7 @@ public:
     virtual void start() = 0;
     virtual void terminate() = 0;
     bool retired() const { return m_retired; }
+    bool launchFailed() const { return m_launchFailed; }
 
 signals:
     void readable();
@@ -26,10 +27,11 @@ signals:
     void exited();
 
 protected:
-    void reportExit();
+    void reportExit(bool launchFailed = false);
 
 private:
     bool m_retired = false;
+    bool m_launchFailed = false;
 };
 
 struct Failure {

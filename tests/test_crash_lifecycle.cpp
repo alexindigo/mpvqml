@@ -24,6 +24,7 @@
 #include <dlfcn.h>
 #include <memory>
 #include <signal.h>
+#include <sys/resource.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -76,6 +77,7 @@ private slots:
     if (fixtureName == "coreCreationFailure") flags = FaultCreate;
     if (fixtureName == "coreInitializationFailure") flags = FaultInitialize;
     if (fixtureName == "captureInitializationFailure") flags = FaultInitialize;
+    if (fixtureName == "captureLateWorkerSkipsOpen") flags = FaultCaptureLateWorker;
     if (fixtureName == "captureWithoutLua") flags = FaultCaptureWithoutLua;
     if (fixtureName == "captureDisablesBuiltinScripts") flags = FaultCaptureScriptOptions;
     if (fixtureName == "playbackOverflowLeavesReservedRepliesIntact") flags = FaultPlaybackOverflow;
@@ -435,6 +437,37 @@ private slots:
   void captureHelperAbort() { captureHelperFault(QStringLiteral("helper-crashed")); }
   void captureHelperDeadline() { captureHelperFault(QStringLiteral("deadline")); }
 
+  void captureRespectsInheritedAddressLimit() {
+#if !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__)
+    constexpr rlim_t bytes = 1024ull * 1024 * 1024;
+    const rlimit limit{bytes, bytes};
+    QVERIFY(::setrlimit(RLIMIT_AS, &limit) == 0);
+#endif
+    QTemporaryDir stage;
+    QVERIFY(stage.isValid());
+    MpvFrameCapture capture;
+    QSignalSpy replies(&capture, &MpvFrameCapture::finishedDetailed);
+    const auto path = stage.filePath("limited.png");
+    QVERIFY(capture.capture(QUrl::fromLocalFile(MPVQML_CRASH_SEEK_VIDEO), 0, 64, 64, QUrl::fromLocalFile(path)) > 0);
+    QTRY_COMPARE_WITH_TIMEOUT(replies.size(), 1, 8000);
+    const auto result = replies.at(0).at(1).toMap();
+    QVERIFY2(result.value("code").toString().isEmpty(), qPrintable(result.value("reason").toString()));
+    QCOMPARE(QImage(path).size(), QSize(64, 36));
+    exercised();
+  }
+
+  void captureLateWorkerSkipsOpen() {
+    QTemporaryDir stage;
+    QVERIFY(stage.isValid());
+    MpvFrameCapture capture;
+    QSignalSpy replies(&capture, &MpvFrameCapture::finishedDetailed);
+    QVERIFY(capture.capture(QUrl::fromLocalFile(stage.filePath("missing-video")), 0, 64, 64,
+                           QUrl::fromLocalFile(stage.filePath("unused.png"))) > 0);
+    QTRY_COMPARE_WITH_TIMEOUT(replies.size(), 1, 9000);
+    QCOMPARE(replies.at(0).at(1).toMap().value("code").toString(), QStringLiteral("deadline"));
+    exercised();
+  }
+
   void captureHelperQueuedCancel() {
     QTemporaryDir staging;
     QVERIFY(staging.isValid());
@@ -466,6 +499,7 @@ private slots:
     QVERIFY(running.cancel(second));
     QTRY_COMPARE_WITH_TIMEOUT(runningFinished.size(), 2, 2000);
     QTRY_COMPARE_WITH_TIMEOUT(runningReleased.size(), 2, 2000);
+    QCOMPARE(faults.counter(FaultInitializes), 2L);
     for (const auto &reply : runningFinished)
       QCOMPARE(reply.at(1).toMap().value("code").toString(), QStringLiteral("cancelled"));
     QCOMPARE(QDir(staging.path()).entryList(QDir::Files | QDir::Hidden), QStringList());
@@ -1070,6 +1104,7 @@ private slots:
                             "captureCancellationBeforeRetiredDelivery",
                             "captureExpiresBeforeEncoding", "capturePublishesPastDeadline",
                             "captureHelperAbort", "captureHelperDeadline", "captureHelperQueuedCancel",
+                            "captureRespectsInheritedAddressLimit", "captureLateWorkerSkipsOpen",
                             "partialRetirementBootstrapFailure", "workerStartupFailure",
                             "bothWorkersBlockedAndAllLiveLeasesReclaimed", "workerTlsCleanupOutlivesFacade",
                             "moduleUnloadWhileBlocked", "publicCoreCreationFailure",

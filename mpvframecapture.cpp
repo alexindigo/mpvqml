@@ -278,7 +278,9 @@ private:
       runWorker(job, [](const Work &job) {
         Fd input;
         Result result;
-        if (job->phase.load() == Phase::Working) {
+        if (job->phase.load() == Phase::Working && Clock::now() >= job->deadline) {
+          result = deadline();
+        } else if (job->phase.load() == Phase::Working) {
           input = Fd(::open(QFile::encodeName(job->source).constData(), O_RDONLY | O_CLOEXEC | O_NONBLOCK));
           struct stat info {};
           const int error = !input || ::fstat(input.get(), &info) != 0 ? errno : 0;
