@@ -44,6 +44,11 @@ for angle in 90 180 270; do
 done
 ```
 
+The large-video case appends a sparse 1 GiB MP4 free box to a synthetic 4K
+fixture and checks the fitted PNG pixels. Native capture fault cases abort or
+block the real software render call, inspect child death even with the GUI
+loop paused, and verify capacity ordering and real pixels after respawn.
+
 The standalone QML scans stage their own explicit media set and modification
 times, so adding a file to the shared asset catalog cannot change the playlist
 under test. The fallback case checks exact identities in newest-first order,

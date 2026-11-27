@@ -26,7 +26,9 @@ are unverified.
 
 The player needs Qt Quick's OpenGL backend. An unsupported backend or failed native
 initialization is reported through player status/error properties, rather than
-successful readiness. Frame capture needs neither a window nor OpenGL.
+successful readiness. Frame capture needs neither a window nor OpenGL; its
+installed `mpvqml-capture` executable under libexec contains native capture
+faults and enforces the deadline. Include it when assembling a runtime prefix.
 MpvQt is not a build or runtime dependency. Selected integration mechanics are
 derived from the pinned upstream described in [UPSTREAM.md](UPSTREAM.md).
 
@@ -76,7 +78,8 @@ source and build directories while the external CMake consumer is built and
 both consumer surfaces are exercised. The no-display QML capture subprocess
 must decode the expected initial and seek pixels. The GUI subprocesses read
 `mpv-version` using the existing async API. The probe checks the plugin's
-relative RUNPATH and the mapped installed libraries, restores permissions
+relative RUNPATH, mapped installed libraries and the installed libexec helper,
+restores permissions
 on failure, and leaves logs and a JSON receipt outside both product trees.
 Use an isolated checkout with no concurrent builds. Install library/include
 directories must be prefix-relative for this proof.

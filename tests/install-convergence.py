@@ -40,6 +40,7 @@ def main():
         return value
 
     libdir = install_dir("LIBDIR")
+    libexecdir = install_dir("LIBEXECDIR")
     includedir = install_dir("INCLUDEDIR")
     # Stage in the product build, then move out of both product trees. This
     # also works for the conventional out-of-source build at source/build.
@@ -86,6 +87,12 @@ def main():
         if runpaths != ["$ORIGIN/../../.."] or "libMpvQt" in dynamic:
             raise RuntimeError("installed plugin must have only the prefix-relative RUNPATH")
         backing = run(["readelf", "-d", prefix / libdir / "libmpvqml.so"], "backing-elf")
+        helper = prefix / libexecdir / "mpvqml-capture"
+        if not os.access(helper, os.X_OK):
+            raise RuntimeError("the prefix lacks the executable capture helper")
+        helper_dynamic = run(["readelf", "-d", helper], "helper-elf")
+        if "[libmpv.so" not in helper_dynamic or "[libmpvqml.so" in helper_dynamic:
+            raise RuntimeError("capture helper must run native capture without the backing QML library")
         if "libMpvQt" in backing or str(build) in backing or str(source) in backing:
             raise RuntimeError("installed backing-library dependency/path mismatch")
         for name in ("install-module-consumer.cpp", "installed-consumer.cpp", "installed-mappings.h"):

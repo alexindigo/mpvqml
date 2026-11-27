@@ -541,25 +541,29 @@ and playback UI. Regular local files only; user configuration, scripts and
 external file references are disabled. The library does not manage the
 staging directory or a persistent cache.
 
-libmpv requires the process-wide `LC_NUMERIC` locale to remain `C` while
-its cores are live. mpvqml sets it before core creation, does not restore
-it, and cannot serialize unrelated host locale changes. Hosts must not
-change `LC_NUMERIC` while using libmpv.
+Capture runs libmpv in the installed `mpvqml-capture` helper and does not
+change the application's `LC_NUMERIC`. In-process `MpvPlayer` playback still
+requires `LC_NUMERIC=C` while its libmpv cores are live.
 
 A positive ID means admitted, not decoded. `finished(id, code, reason)`
 is queued after admission, exactly once per positive ID while the capture
 object exists. Empty `code` means the PNG is committed; otherwise `code`
 identifies the failed stage and `reason` is diagnostic text. Negative
 admission returns are libmpv error codes and get no signal. Two requests
-may run per instance, further subject to the shared native lease limit.
+may be admitted per instance, further subject to the shared admission limit.
+Admitted work can wait for a helper slot.
 
 `finishedDetailed(id, detail)` follows the legacy signal if the object still
 exists. It carries the same `code` and `reason`, the stage (`open-input`,
 `initialize-core`, `initialize-render`, `load-command`, `initial-frame`,
 `seek-command`, `seek-frame`, `render`, `encode`, `publish`, `complete`,
-or `cancelled`), and integer `mpvError` and `systemError` fields. These fields
+`cancelled`, or `helper`), and integer `mpvError` and `systemError` fields. These fields
 are zero when no corresponding libmpv error or system errno is available.
 Both signals describe the same terminal outcome, not two results.
+
+The `helper` stage reports `helper-crashed` for an unexpected exit or closed
+channel, `deadline` for an expired admission or native budget, `protocol-error`
+for a malformed reply, or `helper-unavailable` when capture work cannot start.
 
 Alternatively, `tryCapture(source, fraction, maxWidth, maxHeight, destination)`
 submits the same job and returns `{ status, id, error, reason }`. Use one
@@ -573,11 +577,11 @@ diagnostic `reason`. Only accepted jobs emit `finished`.
 | `Accepted` | Job admitted; wait for its terminal result. |
 | `InvalidArguments` | Correct the arguments before trying again. |
 | `LocalBusy` | Both slots on this object are occupied. |
-| `SharedBusy` | The process-wide playback/capture pool is full. |
+| `SharedBusy` | The process-wide playback/capture admission limit is reached. |
 | `IdExhausted` | This object's positive ID space is exhausted. |
 | `AllocationFailed` | The library could not allocate job or core ownership. |
 | `BackendUnavailable` | The native retirement service could not start. |
-| `WorkerUnavailable` | The capture worker could not start. |
+| `WorkerUnavailable` | The capture worker could not start (legacy admission status). |
 
 On local pressure, `capacityReleased(id)` announces that the named job
 has freed its local and shared slots. It follows `finished` and is not
@@ -591,15 +595,16 @@ already taken the slot.
 `cancel(id)` returns true if it stopped publication. It queues a
 `cancelled` result and cannot publish that job's PNG. False means the
 request was unknown, previously cancelled, or has begun atomic publication.
-Use unique destinations; a cancelled request retains its worker slot until
-native cleanup finishes. Destruction drops callbacks and cancels any job
-that has not begun publication without joining native work. The 7-second
-deadline starts at admission and is checked at work boundaries, including
-before encoding and before entering publication. Once publication begins,
-the result reports whether it committed, not whether the deadline elapsed.
-The 4096-pixel output edges, 64-MiPixel decoder limit and native job limits
-bound different resources; none preempts stalled I/O or native calls or
-isolates decoder faults. A consumer may apply its own waiting deadline.
+Use unique destinations. Queued cancellation never starts native work;
+running cancellation can kill the helper and retains the slot through reaping
+and any outstanding filesystem work. Destruction drops callbacks and cancels
+any job that has not begun publication without joining native work. The
+seven-second deadline starts at admission and kills a stuck native helper.
+Application-side filesystem calls have cooperative deadline checks, not a hard
+I/O limit. Once publication begins, the result reports whether it committed,
+not whether the deadline elapsed. The 4096-pixel output edges, 64-MiPixel
+decoder limit, helper address-space ceiling and job limits bound different
+resources. Failed helpers can be replaced for subsequent jobs.
 
 ## Track and playlist data
 

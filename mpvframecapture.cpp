@@ -5,31 +5,37 @@
 #include <QFile>
 #include <QImage>
 #include <QPointer>
+#include <QScopeGuard>
 #include <QSize>
 #include <QTemporaryFile>
-#include <QTransform>
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <fcntl.h>
 #include <limits>
+#include <mpv/client.h>
 #include <mutex>
 #include <optional>
-#include <mpv/render.h>
+#include "capture/capture-wire.h"
+#include "capture/pool.h"
+#include <QCoreApplication>
+#include <QThread>
+#include <QTimer>
+#include <deque>
+#include <unordered_map>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 
 namespace {
 using namespace MpvQmlPrivate;
-using Clock = std::chrono::steady_clock;
-constexpr auto CaptureBudget = std::chrono::seconds(7);
-constexpr int MaxEdge = 4096;
+using namespace MpvCapture;
 constexpr int MaxJobs = 2;
 
 enum class Phase { Working, Cancelled, Publishing };
-enum class Stage { Input, Core, Context, Load, InitialFrame, Seek, SeekFrame, Render, Encode, Publish, Complete, Cancelled };
 
 const char *stageName(Stage stage) {
   switch (stage) {
@@ -45,17 +51,10 @@ const char *stageName(Stage stage) {
   case Stage::Publish: return "publish";
   case Stage::Complete: return "complete";
   case Stage::Cancelled: return "cancelled";
+  case Stage::Helper: return "helper";
   }
   Q_UNREACHABLE();
 }
-
-struct Result {
-  QString code;
-  QString reason;
-  Stage stage = Stage::Complete;
-  int mpvError = 0;
-  int systemError = 0;
-};
 
 struct Descriptor {
   int fd = -1;
@@ -64,10 +63,6 @@ struct Descriptor {
   Descriptor &operator=(const Descriptor &) = delete;
   ~Descriptor() { if (fd >= 0) ::close(fd); }
 };
-
-Result mpvFailure(Stage stage, QString code, int error) {
-  return {std::move(code), QString::fromLatin1(mpv_error_string(error)), stage, error};
-}
 
 struct Budget {
   const std::atomic<Phase> &phase;
@@ -82,177 +77,9 @@ struct Budget {
   }
 };
 
-// This private core has just one load and at most one explicit seek. Native
-// restarts have no token: require the appropriate lifecycle event before a
-// restart, independently of the correlated command reply. A reply is not a
-// readiness event, and seeing a restart before SEEK cannot complete a seek.
-class FrameEvents {
-public:
-  static constexpr uint64_t Load = 1, Seek = 2;
-
-  void beginSeek() { m_state = {Seek}; }
-
-  Stage stage() const {
-    if (m_state.token == Load)
-      return m_state.acknowledged ? Stage::InitialFrame : Stage::Load;
-    return m_state.acknowledged ? Stage::SeekFrame : Stage::Seek;
-  }
-
-  std::optional<Result> accept(const mpv_event &event) {
-    switch (event.event_id) {
-    case MPV_EVENT_COMMAND_REPLY:
-      if (event.reply_userdata != m_state.token || m_state.acknowledged)
-        break;
-      if (event.error < 0)
-        return m_state.token == Load ? mpvFailure(Stage::Load, QStringLiteral("open-failed"), event.error)
-                                     : mpvFailure(Stage::Seek, QStringLiteral("seek-failed"), event.error);
-      m_state.acknowledged = true;
-      break;
-    case MPV_EVENT_FILE_LOADED:
-    case MPV_EVENT_SEEK:
-      if (event.event_id == (m_state.token == Load ? MPV_EVENT_FILE_LOADED : MPV_EVENT_SEEK)) {
-        m_state.started = true;
-        m_state.restarted = false;
-      }
-      break;
-    case MPV_EVENT_PLAYBACK_RESTART:
-      m_state.restarted = m_state.started;
-      break;
-    case MPV_EVENT_END_FILE: {
-      const auto *end = static_cast<const mpv_event_end_file *>(event.data);
-      return mpvFailure(frameStage(), QStringLiteral("no-frame"),
-                        end && end->error < 0 ? end->error : MPV_ERROR_NOTHING_TO_PLAY);
-    }
-    case MPV_EVENT_SHUTDOWN:
-      return Result{QStringLiteral("no-frame"), QStringLiteral("Native core shut down"), stage()};
-    case MPV_EVENT_QUEUE_OVERFLOW:
-      return mpvFailure(stage(), QStringLiteral("no-frame"), MPV_ERROR_EVENT_QUEUE_FULL);
-    default:
-      break;
-    }
-    return std::nullopt;
-  }
-
-  bool ready() const { return m_state.acknowledged && m_state.restarted; }
-  bool initial() const { return m_state.token == Load; }
-
-private:
-  Stage frameStage() const { return initial() ? Stage::InitialFrame : Stage::SeekFrame; }
-
-  struct Transition {
-    uint64_t token;
-    bool acknowledged = false;
-    bool started = false;
-    bool restarted = false;
-  } m_state{Load};
-};
-
 bool isFileUrl(const QUrl &url) {
   return url.isLocalFile() && url.host().isEmpty() && !url.hasQuery() && !url.hasFragment()
       && url.toLocalFile().startsWith(QLatin1Char('/')) && !url.toLocalFile().contains(QChar::Null);
-}
-
-QSize videoSize(mpv_handle *mpv, QSize bounds) {
-  int64_t width = 0;
-  int64_t height = 0;
-  if (mpv_get_property(mpv, "video-out-params/dw", MPV_FORMAT_INT64, &width) < 0
-      || mpv_get_property(mpv, "video-out-params/dh", MPV_FORMAT_INT64, &height) < 0
-      || width <= 0 || height <= 0 || width > INT_MAX || height > INT_MAX)
-    return {};
-  if (bounds.width() >= width && bounds.height() >= height)
-    return QSize(int(width), int(height));
-  return QSize(int(width), int(height)).scaled(bounds, Qt::KeepAspectRatio).expandedTo(QSize(1, 1));
-}
-
-Result renderFrame(mpv_handle *mpv, mpv_render_context *render, QSize bounds, QImage &image) {
-  // The filter strips this metadata from the software renderer's input. Read
-  // the pre-filter orientation and apply it ourselves (see UPSTREAM.md).
-  int64_t rotation = 0;
-  if (mpv_get_property(mpv, "video-params/rotate", MPV_FORMAT_INT64, &rotation) < 0 || rotation % 90 != 0)
-    rotation = 0;
-  rotation %= 360;
-  if (rotation % 180 != 0)
-    bounds.transpose();
-  const QSize size = videoSize(mpv, bounds);
-  if (!size.isValid())
-    return {QStringLiteral("no-frame"), QStringLiteral("No video dimensions"), Stage::Render};
-  image = QImage(size, QImage::Format_RGBX8888);
-  if (image.isNull())
-    return {QStringLiteral("render-failed"), QStringLiteral("Cannot allocate the bounded frame"), Stage::Render};
-  int dimensions[] = {size.width(), size.height()};
-  size_t stride = image.bytesPerLine();
-  int block = 0;
-  char pixelFormat[] = "rgb0";
-  mpv_render_param options[] = {
-      {MPV_RENDER_PARAM_SW_SIZE, dimensions}, {MPV_RENDER_PARAM_SW_FORMAT, pixelFormat},
-      {MPV_RENDER_PARAM_SW_STRIDE, &stride}, {MPV_RENDER_PARAM_SW_POINTER, image.bits()},
-      {MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, &block}, {MPV_RENDER_PARAM_INVALID, nullptr}};
-  // No ADVANCED_CONTROL: this private thread may use both core and renderer.
-  const int error = mpv_render_context_render(render, options);
-  if (error < 0)
-    return mpvFailure(Stage::Render, QStringLiteral("render-failed"), error);
-  for (int y = 0; y < image.height(); ++y) {
-    auto *row = image.scanLine(y);
-    for (int x = 0; x < image.width(); ++x)
-      row[x * 4 + 3] = 255;
-  }
-  if (rotation != 0) {
-    image = image.transformed(QTransform().rotate(rotation));
-    if (image.isNull())
-      return {QStringLiteral("render-failed"), QStringLiteral("Cannot allocate the oriented frame"), Stage::Render};
-  }
-  return {};
-}
-
-Result readFrame(mpv_handle *mpv, mpv_render_context *render, const QByteArray &url,
-                 double fraction, QSize bounds, const Budget &budget, QImage &image) {
-  if (auto stopped = budget.stop(Stage::Load))
-    return *stopped;
-  const char *load[] = {"loadfile", url.constData(), nullptr};
-  int error = mpv_command_async(mpv, FrameEvents::Load, load);
-  if (error < 0)
-    return mpvFailure(Stage::Load, QStringLiteral("open-failed"), error);
-
-  FrameEvents events;
-  for (;;) {
-    if (auto stopped = budget.stop(events.stage()))
-      return *stopped;
-    if (auto failed = events.accept(*mpv_wait_event(mpv, 0.01)))
-      return *failed;
-    if (auto stopped = budget.stop(events.stage()))
-      return *stopped;
-    if (events.ready()) {
-      double duration = 0;
-      if (!(events.initial() && fraction > 0
-            && mpv_get_property(mpv, "duration", MPV_FORMAT_DOUBLE, &duration) >= 0
-            && std::isfinite(duration) && duration >= 1)) {
-        if (auto stopped = budget.stop(Stage::Render))
-          return *stopped;
-        return renderFrame(mpv, render, bounds, image);
-      }
-
-      if (auto stopped = budget.stop(Stage::Seek))
-        return *stopped;
-      const QByteArray position = QByteArray::number(duration * fraction, 'g', 17);
-      const char *seek[] = {"seek", position.constData(), "absolute+exact", nullptr};
-      error = mpv_command_async(mpv, FrameEvents::Seek, seek);
-      if (error < 0)
-        return mpvFailure(Stage::Seek, QStringLiteral("seek-failed"), error);
-      events.beginSeek();
-    }
-    // The VO must be allowed to complete a flip before the readiness event.
-    // Skip display, not the native frame handoff; libmpv keeps that frame for
-    // the eventual memory render (vo_libmpv.c on the supported libmpv).
-    if (mpv_render_context_update(render) & MPV_RENDER_UPDATE_FRAME) {
-      int skip = 1;
-      int block = 0;
-      mpv_render_param options[] = {{MPV_RENDER_PARAM_SKIP_RENDERING, &skip},
-          {MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, &block}, {MPV_RENDER_PARAM_INVALID, nullptr}};
-      error = mpv_render_context_render(render, options);
-      if (error < 0)
-        return mpvFailure(Stage::Render, QStringLiteral("render-failed"), error);
-    }
-  }
 }
 
 Result writeFrame(const QString &destination, const QImage &image, const Budget &budget,
@@ -313,8 +140,7 @@ struct MpvFrameCapture::Outcome : Result {
 };
 
 struct MpvFrameCapture::Dispatch {
-  std::mutex lock;
-  MpvFrameCapture *receiver = nullptr; // Read only under lock off the object's thread.
+  MpvFrameCapture *receiver = nullptr; // Facade and queue thread only.
 };
 
 struct MpvFrameCapture::Admission {
@@ -333,51 +159,218 @@ struct MpvFrameCapture::Job {
   std::atomic<Phase> phase{Phase::Working};
   bool cancellationDelivered = false; // GUI thread only.
 
-  Result run(MpvBackendCore &core, Descriptor &input) {
-    const Budget budget{phase, deadline};
-    if (auto stopped = budget.stop(Stage::Input))
-      return *stopped;
-    input.fd = ::open(QFile::encodeName(source).constData(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
-    struct stat info {};
-    const int statError = input.fd < 0 || ::fstat(input.fd, &info) != 0 ? errno : 0;
-    if (statError || !S_ISREG(info.st_mode))
-      return {QStringLiteral("unreadable"), QStringLiteral("Cannot open a readable regular video file"), Stage::Input, 0, statError};
-    if (auto stopped = budget.stop(Stage::Core))
-      return *stopped;
-    const auto diagnostic = core.initialize({
-        {"config", "no"}, {"terminal", "no"}, {"load-scripts", "no"},
-        {"access-references", "no"}, {"vo", "libmpv"},
-        {"vf", "format=rotate=0"},
-        {"aid", "no"}, {"sid", "no"}, {"audio-file-auto", "no"}, {"sub-auto", "no"},
-        {"pause", "yes"}, {"keep-open", "yes"}, {"hwdec", "no"}, {"vd-lavc-threads", "1"},
-        // Limit decoded source pixels independently of the caller's output
-        // bounds. 64 MiPixels also admits 8K UHD sources.
-        {"vd-lavc-o", "max_pixels=67108864"}, {"cache", "no"},
-        {"osd-level", "0"},
-        // load-scripts controls user scripts, not these built-ins. Their
-        // options can be absent when Lua or the script is not built in.
-        {"osc", "no", true}, {"ytdl", "no", true}, {"load-stats-overlay", "no", true},
-        {"load-console", "no", true}, {"load-osd-console", "no", true}, {"load-auto-profiles", "no", true},
-        {"load-select", "no", true}, {"load-positioning", "no", true},
-        {"load-commands", "no", true}, {"load-context-menu", "no", true}});
-    if (diagnostic.error < 0)
-      return {QStringLiteral("initialization-failed"), diagnostic.message, Stage::Core, diagnostic.error};
-    if (auto stopped = budget.stop(Stage::Context))
-      return *stopped;
-    auto *mpv = core.handle();
-    mpv_render_context *context = nullptr;
-    char api[] = MPV_RENDER_API_TYPE_SW;
-    mpv_render_param params[] = {{MPV_RENDER_PARAM_API_TYPE, api}, {MPV_RENDER_PARAM_INVALID, nullptr}};
-    const int error = mpv_render_context_create(&context, mpv, params);
-    if (error < 0)
-      return mpvFailure(Stage::Context, QStringLiteral("initialization-failed"), error);
-    std::unique_ptr<mpv_render_context, decltype(&mpv_render_context_free)> render(context, mpv_render_context_free);
-    QImage image;
-    auto result = readFrame(mpv, render.get(), QByteArray("fd://") + QByteArray::number(input.fd), fraction, bounds, budget, image);
-    if (!result.code.isEmpty())
-      return result;
-    return writeFrame(destination, image, budget, phase);
+  std::shared_ptr<Dispatch> delivery;
+  QPointer<Queue> queue;
+  std::unique_ptr<QTimer> queuedTimer;
+  std::unique_ptr<MpvBackendCore> permit;
+  Fd output;
+  Result result;
+  QSize size;
+  int poolTicket = 0;
+};
+
+class MpvFrameCapture::Queue final : public QObject {
+  using Work = std::shared_ptr<Job>;
+  struct WorkerDispatch {
+    std::mutex lock;
+    Queue *receiver = nullptr;
+  };
+
+public:
+  static Queue &current() {
+    static thread_local QPointer<Queue> queue;
+    if (!queue) {
+      auto *app = QCoreApplication::instance();
+      auto *thread = QThread::currentThread();
+      queue = new Queue(app && app->thread() == thread ? app : nullptr);
+      if (!queue->parent())
+        connect(thread, &QThread::finished, queue, &QObject::deleteLater);
+    }
+    return *queue;
   }
+
+  void enqueue(const Work &job) {
+    // Admission is already bounded by the original shared lease ledger.
+    job->queuedTimer = std::make_unique<QTimer>();
+    job->queuedTimer->setSingleShot(true);
+    job->queuedTimer->setTimerType(Qt::PreciseTimer);
+    connect(job->queuedTimer.get(), &QTimer::timeout, this, [this, weak = std::weak_ptr<Job>(job)] {
+      if (auto job = weak.lock(); job && removeWaiting(job))
+        finish(job, deadline());
+    });
+    waiting.push_back(job);
+    job->queuedTimer->start(std::chrono::ceil<std::chrono::milliseconds>(job->deadline - Clock::now()));
+    drain();
+  }
+
+  void cancel(const Work &job) {
+    if (removeWaiting(job)) {
+      finish(job, {});
+      return;
+    }
+    if (job->poolTicket)
+      pool.cancel(job->poolTicket);
+  }
+
+private:
+  explicit Queue(QObject *parent) : QObject(parent), workers(std::make_shared<WorkerDispatch>()) {
+    workers->receiver = this;
+    connect(&pool, &Pool::capacityReleased, this, [this](int ticket) {
+      auto entry = native.extract(ticket);
+      if (!entry.empty()) {
+        auto job = std::move(entry.mapped());
+        job->poolTicket = 0;
+        if (job->phase.load() != Phase::Working || !job->result.code.isEmpty()) {
+          settle(job, std::move(job->result));
+        } else {
+          runWorker(job, [](const Work &job) {
+            auto result = publish(job);
+            return [job, result = std::move(result)](Queue &queue) mutable { queue.settle(job, std::move(result)); };
+          });
+        }
+      }
+    });
+  }
+
+  ~Queue() override {
+    std::lock_guard lock(workers->lock);
+    workers->receiver = nullptr;
+  }
+
+  static Result deadline() { return {"deadline", "Capture helper deadline exceeded", Stage::Helper}; }
+
+  bool removeWaiting(const Work &job) {
+    auto it = std::find(waiting.begin(), waiting.end(), job);
+    if (it == waiting.end())
+      return false;
+    job->queuedTimer->stop();
+    waiting.erase(it);
+    return true;
+  }
+
+  template<class Function>
+  void runWorker(const Work &job, Function work) {
+    try {
+      std::thread([dispatch = workers, job, work = std::move(work)] {
+        auto response = work(job);
+        std::lock_guard lock(dispatch->lock);
+        if (auto *queue = dispatch->receiver)
+          QMetaObject::invokeMethod(queue, [queue, response = std::move(response)]() mutable { response(*queue); },
+                                    Qt::QueuedConnection);
+      }).detach();
+    } catch (const std::system_error &) {
+      settle(job, {"helper-unavailable", "Cannot start capture filesystem worker", Stage::Helper});
+    } catch (const std::bad_alloc &) {
+      settle(job, {"helper-unavailable", "Cannot allocate capture filesystem work", Stage::Helper});
+    }
+  }
+
+  void drain() {
+    while (active < MaxJobs && !waiting.empty()) {
+      auto job = std::move(waiting.front());
+      waiting.pop_front();
+      job->queuedTimer.reset();
+      if (Clock::now() >= job->deadline) {
+        finish(job, deadline());
+        continue;
+      }
+      ++active;
+      runWorker(job, [](const Work &job) {
+        Fd input;
+        Result result;
+        if (job->phase.load() == Phase::Working && Clock::now() >= job->deadline) {
+          result = deadline();
+        } else if (job->phase.load() == Phase::Working) {
+          input = Fd(::open(QFile::encodeName(job->source).constData(), O_RDONLY | O_CLOEXEC | O_NONBLOCK));
+          struct stat info {};
+          const int error = !input || ::fstat(input.get(), &info) != 0 ? errno : 0;
+          if (error || !S_ISREG(info.st_mode))
+            result = {"unreadable", "Cannot open a readable regular video file", Stage::Input, 0, error};
+        }
+        return [job, input = std::move(input), result = std::move(result)](Queue &queue) mutable {
+          queue.prepared(job, std::move(input), std::move(result));
+        };
+      });
+    }
+  }
+
+  void prepared(const Work &job, Fd input, Result result) {
+    if (job->phase.load() != Phase::Working || !result.code.isEmpty()) {
+      settle(job, std::move(result));
+      return;
+    }
+    const auto now = Clock::now();
+    if (now >= job->deadline) {
+      settle(job, deadline());
+      return;
+    }
+    job->output = Fd(::memfd_create("mpvqml-frame", MFD_ALLOW_SEALING | MFD_CLOEXEC));
+    Fd writable;
+    if (!job->output || ::ftruncate(job->output.get(), pixelBytes(job->bounds)) < 0
+        || ::fcntl(job->output.get(), F_ADD_SEALS, F_SEAL_GROW) < 0
+        || !(writable = Fd(::fcntl(job->output.get(), F_DUPFD_CLOEXEC, 0)))) {
+      settle(job, {"render-failed", "Cannot reserve the capture pixel buffer", Stage::Render, 0, errno});
+      return;
+    }
+    Frame request{Kind::Request, 0, encodeSpec({job->bounds, job->fraction, job->deadline}), {}};
+    request.fds.push_back(std::move(input));
+    request.fds.push_back(std::move(writable));
+    const auto ticket = pool.submit(std::move(request), job->deadline,
+        [job](JobReply reply) {
+          if (reply.error)
+            job->result = {std::move(reply.error.code), std::move(reply.error.detail), Stage::Helper};
+          else
+            decodeResult(reply.frame, job->result, job->size); // validated before consuming ticket
+        }, [job](const Frame &frame) {
+          Result result;
+          QSize size;
+          return decodeResult(frame, result, size) && (!result.code.isEmpty()
+              || (size.width() <= job->bounds.width() && size.height() <= job->bounds.height()
+                  && validOutput(job->output.get(), size, true)));
+        });
+    if (ticket.status != Pool::Admission::Accepted) {
+      settle(job, Clock::now() >= job->deadline ? deadline()
+          : Result{"helper-unavailable", "Could not admit the capture helper request", Stage::Helper});
+      return;
+    }
+    job->poolTicket = ticket.id;
+    native.emplace(ticket.id, job);
+  }
+
+  static Result publish(const Work &job) {
+    const Budget budget{job->phase, job->deadline};
+    if (auto stopped = budget.stop(Stage::Encode))
+      return *stopped;
+    const auto bytes = size_t(pixelBytes(job->size));
+    const auto *pixels = static_cast<const uchar *>(::mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, job->output.get(), 0));
+    if (pixels == MAP_FAILED)
+      return {"render-failed", "Cannot map captured pixels", Stage::Render, 0, errno};
+    const auto unmap = qScopeGuard([=] { ::munmap(const_cast<uchar *>(pixels), bytes); });
+    const QImage image(pixels, job->size.width(), job->size.height(), job->size.width() * 4,
+                       QImage::Format_RGBX8888);
+    return writeFrame(job->destination, image, budget, job->phase);
+  }
+
+  void settle(const Work &job, Result result) {
+    --active;
+    finish(job, std::move(result));
+    drain();
+  }
+
+  static void finish(const Work &job, Result result) {
+    job->output = {};
+    job->permit.reset();
+    if (auto *receiver = job->delivery->receiver)
+      QMetaObject::invokeMethod(receiver, [receiver, job, result = std::move(result)] {
+        receiver->retired(job, Outcome(std::move(result)));
+      }, Qt::QueuedConnection);
+  }
+
+  Pool pool;
+  std::shared_ptr<WorkerDispatch> workers;
+  std::deque<Work> waiting;
+  std::unordered_map<int, Work> native;
+  int active = 0;
 };
 
 MpvFrameCapture::MpvFrameCapture(QObject *parent)
@@ -388,9 +381,9 @@ MpvFrameCapture::MpvFrameCapture(QObject *parent)
 MpvFrameCapture::~MpvFrameCapture() {
   for (const auto &job : std::as_const(m_activeJobs)) {
     Phase working = Phase::Working;
-    job->phase.compare_exchange_strong(working, Phase::Cancelled);
+    if (job->phase.compare_exchange_strong(working, Phase::Cancelled) && job->queue)
+      job->queue->cancel(job);
   }
-  std::lock_guard lock(m_dispatch->lock);
   m_dispatch->receiver = nullptr;
 }
 
@@ -435,24 +428,11 @@ MpvFrameCapture::Admission MpvFrameCapture::admit(const QUrl &source, double fra
   try {
     auto job = std::shared_ptr<Job>(new Job{id, source.toLocalFile(), destination.toLocalFile(), fraction,
         QSize(maxWidth, maxHeight), Clock::now() + CaptureBudget});
+    job->permit = std::move(permit);
+    job->delivery = m_dispatch;
+    job->queue = &Queue::current();
     m_activeJobs.insert(id, job);
-    std::thread([job, dispatch = m_dispatch, permit = std::move(permit)]() mutable {
-      Result result;
-      {
-        Descriptor input;
-        result = job->run(*permit, input);
-        // The render context is gone, but fd:// still needs its input descriptor
-        // through final native teardown. Release both before announcing capacity.
-        permit->finishExclusive();
-      }
-      permit.reset();
-      std::lock_guard lock(dispatch->lock);
-      auto *receiver = dispatch->receiver;
-      if (receiver)
-        QMetaObject::invokeMethod(receiver, [receiver, job, result = std::move(result)] {
-           receiver->retired(job, Outcome(std::move(result)));
-        }, Qt::QueuedConnection);
-    }).detach();
+    job->queue->enqueue(job);
   } catch (const std::bad_alloc &) {
     m_activeJobs.remove(id);
     return {AllocationFailed, MPV_ERROR_NOMEM, QStringLiteral("Cannot allocate capture job ownership")};
@@ -495,8 +475,9 @@ bool MpvFrameCapture::cancel(int id) {
   Phase working = Phase::Working;
   if (!job || !job->phase.compare_exchange_strong(working, Phase::Cancelled))
     return false;
-  // Keep the slot occupied until native cleanup; cancellation delivery itself
-  // never waits for a decoder or a filesystem operation.
+  if (job->queue)
+    job->queue->cancel(job);
+  // Keep capacity occupied until retirement, without delaying cancellation.
   QMetaObject::invokeMethod(this, [this, job = std::move(job)] {
     deliverCancellation(job);
   }, Qt::QueuedConnection);
