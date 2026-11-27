@@ -4,6 +4,18 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-11-27
+
+### Fixed
+
+Frame capture now runs in a separate process, so a capture crash no longer
+takes down your application. A stalled capture fails with a timeout, and you
+can try again. Existing QML code does not need to change. Package the
+`mpvqml-capture` helper under `libexec` alongside the library installation.
+
+- Isolate frame capture in a helper process (`8a8a3c4`).
+- Enforce capture deadlines and respect inherited limits (`0c56199`).
+
 ## [0.3.0] — 2026-11-25
 
 ### Changed (breaking)
